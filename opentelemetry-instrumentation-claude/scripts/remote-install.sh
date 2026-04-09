@@ -162,11 +162,30 @@ msg "    ✅ 解压完成" "    ✅ Extracted"
 echo ""
 
 # ============================================================
-# Run installer
+# Copy package to a permanent location before running installer
+#
+# WHY: install.sh may fall back to "npm link" when "npm install -g" fails.
+# npm link creates a symlink from the global bin to the SOURCE directory.
+# If the source is a temp dir (as it is here), the temp dir gets deleted
+# by the EXIT trap after this script finishes, leaving a dangling symlink
+# and a broken "otel-claude-hook" command.
+#
+# FIX: copy the extracted package to a permanent directory first, then
+# run install.sh from there. npm link (if used) will then point to the
+# permanent copy, not the temp dir.
 # ============================================================
+PERMANENT_DIR="$HOME/.cache/opentelemetry.instrumentation.claude/package"
+msg "==> 拷贝到永久目录 $PERMANENT_DIR ..." \
+    "==> Copying to permanent directory $PERMANENT_DIR ..."
+mkdir -p "$(dirname "$PERMANENT_DIR")"
+rm -rf "$PERMANENT_DIR"
+cp -r "$INSTALL_SRC" "$PERMANENT_DIR"
+msg "    ✅ 拷贝完成" "    ✅ Copied"
+echo ""
+
 msg "==> 运行安装程序..." "==> Running installer..."
 echo ""
-cd "$INSTALL_SRC"
+cd "$PERMANENT_DIR"
 chmod +x scripts/install.sh bin/otel-claude-hook scripts/setup-alias.sh scripts/uninstall.sh 2>/dev/null || true
 bash scripts/install.sh
 

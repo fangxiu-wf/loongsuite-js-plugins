@@ -71,39 +71,24 @@ msg "    ✅ 依赖安装完成" \
 echo ""
 
 # 2. Install package globally so otel-claude-hook is on PATH
-#
-# Fallback strategy (in order):
-#   a) npm install -g .   — copies package into global node_modules (preferred)
-#   b) local copy fallback — copies package to ~/.local/lib/ then creates a
-#                            wrapper in ~/.local/bin/ pointing to that copy.
-#
-# NOTE: "npm link" is intentionally NOT used as a fallback.
-# npm link creates a symlink from the global bin to the SOURCE directory.
-# When install.sh is invoked from remote-install.sh, the source directory is a
-# temporary directory that gets deleted after the script exits, leaving a
-# dangling symlink and a broken otel-claude-hook command.
 msg "==> 正在全局注册 otel-claude-hook..." \
     "==> Registering otel-claude-hook globally..."
 if npm install -g . --silent 2>/dev/null; then
     msg "    ✅ 已通过 npm install -g 全局安装" \
         "    ✅ Installed globally via npm install -g"
+elif npm link --silent 2>/dev/null; then
+    msg "    ✅ 已通过 npm link 全局链接" \
+        "    ✅ Linked globally via npm link"
 else
-    msg "    ⚠️  全局安装失败，拷贝到本地永久目录..." \
-        "    ⚠️  Global install failed; copying to a permanent local directory..."
-    LOCAL_LIB="$HOME/.local/lib/otel-claude-hook"
+    msg "    ⚠️  全局安装失败，尝试本地 wrapper 方案..." \
+        "    ⚠️  Global install failed; trying local wrapper fallback..."
     LOCAL_BIN="$HOME/.local/bin"
-    # Copy the entire package to a permanent location (not a symlink)
-    rm -rf "$LOCAL_LIB"
-    cp -r "$PKG_DIR" "$LOCAL_LIB"
     mkdir -p "$LOCAL_BIN"
-    # Create a wrapper that points to the permanent copy
     cat > "$LOCAL_BIN/otel-claude-hook" << WRAPPER
 #!/usr/bin/env bash
-exec node "$LOCAL_LIB/bin/otel-claude-hook" "\$@"
+exec node "$PKG_DIR/bin/otel-claude-hook" "\$@"
 WRAPPER
     chmod +x "$LOCAL_BIN/otel-claude-hook"
-    msg "    ✅ 包已拷贝至 $LOCAL_LIB" \
-        "    ✅ Package copied to $LOCAL_LIB"
     msg "    ✅ Wrapper 已安装至 $LOCAL_BIN/otel-claude-hook" \
         "    ✅ Wrapper installed at $LOCAL_BIN/otel-claude-hook"
     msg "       请确认 $LOCAL_BIN 在 PATH 中" \
