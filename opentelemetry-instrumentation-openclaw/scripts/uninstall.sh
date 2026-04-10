@@ -195,7 +195,8 @@ _remove_block_from_file() {
   local file="$1" marker="$2" marker_end="$3"
   [[ -f "$file" ]] || return
   grep -q "$marker" "$file" 2>/dev/null || return
-  sed -i "/^${marker}$/,/^${marker_end}$/d" "$file"
+  local _tmp; _tmp=$(mktemp)
+  sed "/^${marker}$/,/^${marker_end}$/d" "$file" > "$_tmp" && mv "$_tmp" "$file" || rm -f "$_tmp"
   ok "Removed env block from $file"
 }
 for _f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile"; do
