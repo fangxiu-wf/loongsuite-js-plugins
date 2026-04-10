@@ -24,6 +24,14 @@ import type {
 } from "./types.js";
 import { PLUGIN_VERSION } from "./version.js";
 
+// Semantic convention dialect:
+// LOONGSUITE_SEMCONV_DIALECT_NAME=ALIBABA_GROUP → gen_ai.span_kind_name
+// default (ALIBABA_CLOUD or unset)             → gen_ai.span.kind
+const SPAN_KIND_ATTR =
+  process.env["LOONGSUITE_SEMCONV_DIALECT_NAME"] === "ALIBABA_GROUP"
+    ? "gen_ai.span_kind_name"
+    : "gen_ai.span.kind";
+
 const MAX_ATTR_LENGTH = 3_200_000;
 
 function truncate(value: string): string {
@@ -130,7 +138,7 @@ export class ArmsExporter {
     const genAiSpanKind = this.mapGenAiSpanKind(spanData.type);
     const spanAttrs = this.flattenAttributes(spanData.attributes);
     if (genAiSpanKind) {
-      spanAttrs["gen_ai.span.kind"] = genAiSpanKind;
+      spanAttrs[SPAN_KIND_ATTR] = genAiSpanKind;
     }
 
     const span = this.tracer.startSpan(
@@ -197,7 +205,7 @@ export class ArmsExporter {
     const exportGenAiSpanKind = this.mapGenAiSpanKind(spanData.type);
     const exportSpanAttrs = this.flattenAttributes(spanData.attributes);
     if (exportGenAiSpanKind) {
-      exportSpanAttrs["gen_ai.span.kind"] = exportGenAiSpanKind;
+      exportSpanAttrs[SPAN_KIND_ATTR] = exportGenAiSpanKind;
     }
 
     const span = this.tracer.startSpan(

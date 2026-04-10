@@ -190,10 +190,13 @@ else
   warn "No plugin directory to remove"
 fi
 
-# ── Remove Delta temporality env var from shell profiles ──
+# ── Remove Delta temporality + semconv env vars from shell profiles ──
 UNINSTALL_SCRIPT_DIR="$(dirname "$0")"
 if [[ -f "${UNINSTALL_SCRIPT_DIR}/setup-temporality.sh" ]]; then
   bash "${UNINSTALL_SCRIPT_DIR}/setup-temporality.sh" --remove
+fi
+if [[ -f "${UNINSTALL_SCRIPT_DIR}/setup-semconv.sh" ]]; then
+  bash "${UNINSTALL_SCRIPT_DIR}/setup-semconv.sh" --remove
 fi
 
 # ── Restart gateway ──

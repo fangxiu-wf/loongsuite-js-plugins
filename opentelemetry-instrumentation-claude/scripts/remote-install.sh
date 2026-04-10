@@ -33,6 +33,7 @@ ENDPOINT=""
 SERVICE_NAME=""
 HEADERS=""
 DEBUG_MODE=0
+SEMCONV_DIALECT="ALIBABA_CLOUD"
 
 # ============================================================
 # Parse arguments
@@ -61,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             export OTEL_CLAUDE_LANG="${1#--lang=}"; shift ;;
         --debug)
             DEBUG_MODE=1; shift ;;
+        --semconv-dialect)
+            SEMCONV_DIALECT="$2"; shift 2 ;;
+        --semconv-dialect=*)
+            SEMCONV_DIALECT="${1#--semconv-dialect=}"; shift ;;
         *)
             echo "Unknown option: $1" >&2
             exit 1 ;;
@@ -206,6 +211,9 @@ if [ -n "$ENDPOINT" ]; then
     fi
     if [ "$DEBUG_MODE" -eq 1 ]; then
         ENV_LINES="${ENV_LINES}"$'\n'"export CLAUDE_TELEMETRY_DEBUG=1"
+    fi
+    if [ "$SEMCONV_DIALECT" != "ALIBABA_CLOUD" ]; then
+        ENV_LINES="${ENV_LINES}"$'\n'"export LOONGSUITE_SEMCONV_DIALECT_NAME=\"${SEMCONV_DIALECT}\""
     fi
 
     write_env_block() {

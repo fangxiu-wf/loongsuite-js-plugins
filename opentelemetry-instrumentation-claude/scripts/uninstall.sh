@@ -162,6 +162,23 @@ remove_alias_from_file() {
 remove_alias_from_file "$HOME/.bashrc"
 remove_alias_from_file "$HOME/.zshrc"
 remove_alias_from_file "$HOME/.bash_profile"
+
+# Remove env block written by remote-install.sh (ENDPOINT, SEMCONV_DIALECT, etc.)
+remove_env_block_from_file() {
+    local file="$1"
+    [ -f "$file" ] || return
+    grep -q "# BEGIN otel-claude-hook-env" "$file" 2>/dev/null || return
+    local tmp
+    tmp=$(mktemp)
+    sed '/# BEGIN otel-claude-hook-env/,/# END otel-claude-hook-env/d' "$file" > "$tmp"
+    mv "$tmp" "$file"
+    msg "    ✅ 已从 $file 删除 env 配置" \
+        "    ✅ Removed env config from $file"
+}
+
+remove_env_block_from_file "$HOME/.bashrc"
+remove_env_block_from_file "$HOME/.zshrc"
+remove_env_block_from_file "$HOME/.bash_profile"
 echo ""
 
 # 4. 完成
