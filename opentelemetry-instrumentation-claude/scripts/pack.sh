@@ -28,22 +28,27 @@ echo ""
 # 创建 dist 目录
 mkdir -p "$DIST_DIR"
 
-# 打包：先复制到临时目录，清除所有 xattr，再打包
-# 防止安全扫描工具（如 CrowdStrike）写入的 xattr 随 tarball 带到 Linux，
-# 导致 "Ignoring unknown extended header keyword LIBARCHIVE.xattr.*" 警告
+# 打包：先复制到临时目录再清除 xattr，避免安全扫描工具写入的
+# com.apple.provenance、FileXRayCachedResultInEA 等随 tarball 带到 Linux
 PACK_TMPDIR=$(mktemp -d)
 trap 'rm -rf "$PACK_TMPDIR"' EXIT
 
 cd "$PKG_DIR"
-# 复制要打包的文件到临时目录
-cp -r bin src package.json README.md LICENSE "$PACK_TMPDIR/"
-mkdir -p "$PACK_TMPDIR/scripts"
-cp scripts/install.sh scripts/setup-alias.sh scripts/uninstall.sh "$PACK_TMPDIR/scripts/"
 
-# 清除所有 xattr（macOS 专属命令，Linux 下为 no-op）
+# macOS 的 cp -X 从复制阶段就不带 xattr
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  CP_FLAGS="-rX"
+else
+  CP_FLAGS="-r"
+fi
+
+cp $CP_FLAGS bin src package.json README.md LICENSE "$PACK_TMPDIR/"
+mkdir -p "$PACK_TMPDIR/scripts"
+cp $CP_FLAGS scripts/install.sh scripts/setup-alias.sh scripts/uninstall.sh "$PACK_TMPDIR/scripts/"
+
+# 双保险：清除所有残留 xattr
 xattr -cr "$PACK_TMPDIR" 2>/dev/null || true
 
-# 打包
 COPYFILE_DISABLE=1 tar -czf "$OUTPUT" -C "$PACK_TMPDIR" .
 
 SIZE=$(du -sh "$OUTPUT" | cut -f1)
