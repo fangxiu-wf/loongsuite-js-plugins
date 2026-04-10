@@ -192,7 +192,7 @@ msg "==> 运行安装程序..." "==> Running installer..."
 echo ""
 cd "$PERMANENT_DIR"
 chmod +x scripts/install.sh bin/otel-claude-hook scripts/setup-alias.sh scripts/uninstall.sh 2>/dev/null || true
-bash scripts/install.sh --semconv-dialect "$SEMCONV_DIALECT"
+bash scripts/install.sh
 
 # ============================================================
 # Write OTLP environment config (if --endpoint was provided)
@@ -211,6 +211,9 @@ if [ -n "$ENDPOINT" ]; then
     fi
     if [ "$DEBUG_MODE" -eq 1 ]; then
         ENV_LINES="${ENV_LINES}"$'\n'"export CLAUDE_TELEMETRY_DEBUG=1"
+    fi
+    if [ "$SEMCONV_DIALECT" != "ALIBABA_CLOUD" ]; then
+        ENV_LINES="${ENV_LINES}"$'\n'"export LOONGSUITE_SEMCONV_DIALECT_NAME=\"${SEMCONV_DIALECT}\""
     fi
 
     write_env_block() {

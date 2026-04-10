@@ -865,7 +865,6 @@ async function cmdStop() {
 
 async function cmdInstall(opts = {}) {
   const quiet = !!opts.quiet;
-  const semconvDialect = opts.semconvDialect || process.env.LOONGSUITE_SEMCONV_DIALECT_NAME || "ALIBABA_CLOUD";
 
   // Helper: print unless quiet mode
   const log = (...args) => { if (!quiet) console.error(...args); };
@@ -906,7 +905,7 @@ async function cmdInstall(opts = {}) {
     if (fs.existsSync(setupAliasScript)) {
       try {
         const { execSync } = require("child_process");
-        execSync(`bash "${setupAliasScript}" "${semconvDialect}"`, { stdio: quiet ? "ignore" : "inherit" });
+        execSync(`bash "${setupAliasScript}"`, { stdio: quiet ? "ignore" : "inherit" });
       } catch (err) {
         if (!quiet) {
           console.error(installMsg(
