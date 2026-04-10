@@ -22,7 +22,7 @@ const { createToolTitle, createEventData, addResponseToEventData, MAX_CONTENT_LE
 // default (ALIBABA_CLOUD or unset)             → gen_ai.span.kind
 // ---------------------------------------------------------------------------
 const SPAN_KIND_ATTR = process.env.LOONGSUITE_SEMCONV_DIALECT_NAME === "ALIBABA_GROUP"
-  ? SPAN_KIND_ATTR
+  ? "gen_ai.span_kind_name"
   : "gen_ai.span.kind";
 
 // ---------------------------------------------------------------------------
