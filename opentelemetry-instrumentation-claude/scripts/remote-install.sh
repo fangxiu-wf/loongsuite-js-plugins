@@ -33,6 +33,7 @@ ENDPOINT=""
 SERVICE_NAME=""
 HEADERS=""
 DEBUG_MODE=0
+SEMCONV_DIALECT="ALIBABA_CLOUD"
 
 # ============================================================
 # Parse arguments
@@ -61,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             export OTEL_CLAUDE_LANG="${1#--lang=}"; shift ;;
         --debug)
             DEBUG_MODE=1; shift ;;
+        --semconv-dialect)
+            SEMCONV_DIALECT="$2"; shift 2 ;;
+        --semconv-dialect=*)
+            SEMCONV_DIALECT="${1#--semconv-dialect=}"; shift ;;
         *)
             echo "Unknown option: $1" >&2
             exit 1 ;;
@@ -187,7 +192,7 @@ msg "==> 运行安装程序..." "==> Running installer..."
 echo ""
 cd "$PERMANENT_DIR"
 chmod +x scripts/install.sh bin/otel-claude-hook scripts/setup-alias.sh scripts/uninstall.sh 2>/dev/null || true
-bash scripts/install.sh
+bash scripts/install.sh --semconv-dialect "$SEMCONV_DIALECT"
 
 # ============================================================
 # Write OTLP environment config (if --endpoint was provided)

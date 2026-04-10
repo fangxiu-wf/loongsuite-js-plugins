@@ -52,6 +52,19 @@ msg() {
 }
 
 # ---------------------------------------------------------------------------
+# Parse arguments
+# ---------------------------------------------------------------------------
+SEMCONV_DIALECT="ALIBABA_CLOUD"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --semconv-dialect)
+            SEMCONV_DIALECT="$2"; shift 2 ;;
+        --semconv-dialect=*)
+            SEMCONV_DIALECT="${1#--semconv-dialect=}"; shift ;;
+        *)
+            echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
 
 msg "==============================================" \
     "=============================================="
@@ -108,13 +121,13 @@ echo ""
 # 4. Register hooks in ~/.claude/settings.json + enable built-in telemetry
 msg "==> 正在注册 Claude Code Hook 并启用内置遥测..." \
     "==> Registering Claude Code hooks and enabling built-in telemetry..."
-otel-claude-hook install --user
+otel-claude-hook install --user --semconv-dialect "$SEMCONV_DIALECT"
 echo ""
 
 # 5. Set up claude alias in shell profiles
 msg "==> 正在设置 claude 别名..." \
     "==> Setting up claude alias..."
-bash "$SCRIPT_DIR/setup-alias.sh"
+bash "$SCRIPT_DIR/setup-alias.sh" "$SEMCONV_DIALECT"
 echo ""
 
 # 6. Done
