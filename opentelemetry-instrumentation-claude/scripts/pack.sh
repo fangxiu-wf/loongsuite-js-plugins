@@ -28,26 +28,23 @@ echo ""
 # 创建 dist 目录
 mkdir -p "$DIST_DIR"
 
-# 打包（从包根目录，排除无关文件）
-# COPYFILE_DISABLE=1 防止 macOS 将 xattr 扩展属性打入 tarball，
-# 避免在 Linux 上解压时出现 "Ignoring unknown extended header keyword" 警告
+# 打包：先复制到临时目录，清除所有 xattr，再打包
+# 防止安全扫描工具（如 CrowdStrike）写入的 xattr 随 tarball 带到 Linux，
+# 导致 "Ignoring unknown extended header keyword LIBARCHIVE.xattr.*" 警告
+PACK_TMPDIR=$(mktemp -d)
+trap 'rm -rf "$PACK_TMPDIR"' EXIT
+
 cd "$PKG_DIR"
-COPYFILE_DISABLE=1 tar -czf "$OUTPUT" \
-    --exclude='node_modules' \
-    --exclude='coverage' \
-    --exclude='dist' \
-    --exclude='.git' \
-    --exclude='*.test.js' \
-    --exclude='test' \
-    --exclude='package-lock.json' \
-    bin \
-    src \
-    scripts/install.sh \
-    scripts/setup-alias.sh \
-    scripts/uninstall.sh \
-    package.json \
-    README.md \
-    LICENSE
+# 复制要打包的文件到临时目录
+cp -r bin src package.json README.md LICENSE "$PACK_TMPDIR/"
+mkdir -p "$PACK_TMPDIR/scripts"
+cp scripts/install.sh scripts/setup-alias.sh scripts/uninstall.sh "$PACK_TMPDIR/scripts/"
+
+# 清除所有 xattr（macOS 专属命令，Linux 下为 no-op）
+xattr -cr "$PACK_TMPDIR" 2>/dev/null || true
+
+# 打包
+COPYFILE_DISABLE=1 tar -czf "$OUTPUT" -C "$PACK_TMPDIR" .
 
 SIZE=$(du -sh "$OUTPUT" | cut -f1)
 echo "✅ 打包完成: $OUTPUT ($SIZE)"
