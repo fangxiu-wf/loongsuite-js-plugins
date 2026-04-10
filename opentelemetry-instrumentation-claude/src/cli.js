@@ -292,7 +292,7 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
           attributes: {
             "turn.index": turnIdx,
             "gen_ai.input.messages": p,
-            [SPAN_KIND_ATTR]: "LLM",
+            [SPAN_KIND_ATTR]: "STEP",
           },
         },
         parentCtx
