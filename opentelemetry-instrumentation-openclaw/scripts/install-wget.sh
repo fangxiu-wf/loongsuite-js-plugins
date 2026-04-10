@@ -29,6 +29,7 @@ SERVICE_NAME=""
 PLUGIN_URL="${DEFAULT_PLUGIN_URL}"
 INSTALL_DIR=""
 ENABLE_METRICS=true
+SEMCONV_DIALECT="ALIBABA_CLOUD"
 
 # ── Color helpers ──
 RED='\033[0;31m'
@@ -59,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --plugin-url)         need_value "$@"; PLUGIN_URL="$2";     shift 2 ;;
     --install-dir)        need_value "$@"; INSTALL_DIR="$2";    shift 2 ;;
     --disable-metrics)    ENABLE_METRICS=false; shift ;;
+    --semconv-dialect)    need_value "$@"; SEMCONV_DIALECT="$2"; shift 2 ;;
     *)
       error "Unknown option: $1"
       exit 1
@@ -396,6 +398,9 @@ ok "Config updated"
 # ── Write Delta temporality env var to shell profiles ──
 bash "$(dirname "$0")/setup-temporality.sh" --install
 
+# ── Write semconv dialect env var to shell profiles ──
+bash "$(dirname "$0")/setup-semconv.sh" --install "${SEMCONV_DIALECT}"
+
 # ── Summary ──
 echo ""
 echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
@@ -407,6 +412,7 @@ echo "  Config file:   ${CONFIG_PATH}"
 echo "  Endpoint:      ${ENDPOINT}"
 echo "  Service name:  ${SERVICE_NAME}"
 echo "  Metric tempo:  Delta (OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta)"
+echo "  Semconv:       ${SEMCONV_DIALECT} (LOONGSUITE_SEMCONV_DIALECT_NAME=${SEMCONV_DIALECT})"
 echo ""
 
 if [[ "$ENABLE_METRICS" == true ]]; then

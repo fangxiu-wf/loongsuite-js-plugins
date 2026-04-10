@@ -2,13 +2,23 @@
 # setup-alias.sh — Add the claude alias to shell profiles.
 # Called by install.sh. Can also be run standalone.
 #
+# Usage:
+#   bash setup-alias.sh [ALIBABA_CLOUD|ALIBABA_GROUP]
+#
 # The alias ensures every `claude` invocation automatically loads intercept.js
 # for LLM call tracing without requiring NODE_OPTIONS to be set manually.
 
 set -euo pipefail
 
+# Semantic convention dialect (default: ALIBABA_CLOUD → gen_ai.span.kind)
+SEMCONV_DIALECT="${1:-ALIBABA_CLOUD}"
+if [[ "$SEMCONV_DIALECT" != "ALIBABA_CLOUD" && "$SEMCONV_DIALECT" != "ALIBABA_GROUP" ]]; then
+  echo "Warning: unknown dialect '$SEMCONV_DIALECT', defaulting to ALIBABA_CLOUD" >&2
+  SEMCONV_DIALECT="ALIBABA_CLOUD"
+fi
+
 INTERCEPT_PATH="$HOME/.cache/opentelemetry.instrumentation.claude/intercept.js"
-ALIAS_LINE="alias claude='CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_METRIC_EXPORT_INTERVAL=20000 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta NODE_OPTIONS=\"--require $INTERCEPT_PATH\" npx -y @anthropic-ai/claude-code@latest'"
+ALIAS_LINE="alias claude='CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_METRIC_EXPORT_INTERVAL=20000 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta LOONGSUITE_SEMCONV_DIALECT_NAME=${SEMCONV_DIALECT} NODE_OPTIONS=\"--require $INTERCEPT_PATH\" npx -y @anthropic-ai/claude-code@latest'"
 
 # ---------------------------------------------------------------------------
 # 语言检测 / Language detection
