@@ -447,6 +447,11 @@ _add_semconv_env() {
 }
 for _f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile"; do _add_semconv_env "$_f"; done
 
+# 写入 shell profile 后，同步 export 到当前进程环境，
+# 确保下面的 gateway restart 继承到这两个 env var
+export OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta
+export LOONGSUITE_SEMCONV_DIALECT_NAME="${SEMCONV_DIALECT}"
+
 # ── Restart gateway ──
 info "Restarting OpenClaw gateway..."
 if $OPENCLAW_CMD gateway restart 2>&1; then
