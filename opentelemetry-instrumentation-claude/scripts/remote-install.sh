@@ -72,6 +72,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── Auto-detect semconv dialect from endpoint ──
+# Sunfire endpoints are Alibaba-internal and always require ALIBABA_GROUP.
+if [ "$SEMCONV_DIALECT" = "ALIBABA_CLOUD" ] && echo "$ENDPOINT" | grep -qi "sunfire"; then
+    SEMCONV_DIALECT="ALIBABA_GROUP"
+    echo "Sunfire endpoint detected — defaulting semconv dialect to ALIBABA_GROUP"
+fi
+
 # ============================================================
 # Language detection
 # ============================================================
