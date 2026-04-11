@@ -458,6 +458,16 @@ done
 export OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta
 export LOONGSUITE_SEMCONV_DIALECT_NAME="${SEMCONV_DIALECT}"
 
+# ── Inject env vars into systemd user session (systemd installs only) ──
+# shell profile writes don't reach the gateway process; systemctl set-environment does.
+if command -v systemctl &>/dev/null && systemctl --user is-active openclaw-gateway.service &>/dev/null 2>&1; then
+  info "Injecting env vars into systemd user session..."
+  systemctl --user set-environment \
+    OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta \
+    LOONGSUITE_SEMCONV_DIALECT_NAME="${SEMCONV_DIALECT}"
+  ok "Env vars set in systemd"
+fi
+
 # ── Restart gateway ──
 info "Restarting OpenClaw gateway..."
 if $OPENCLAW_CMD gateway restart 2>&1; then
