@@ -27,10 +27,14 @@ import { PLUGIN_VERSION } from "./version.js";
 // Semantic convention dialect:
 // LOONGSUITE_SEMCONV_DIALECT_NAME=ALIBABA_GROUP → gen_ai.span_kind_name
 // default (ALIBABA_CLOUD or unset)             → gen_ai.span.kind
-const SPAN_KIND_ATTR =
-  process.env["LOONGSUITE_SEMCONV_DIALECT_NAME"] === "ALIBABA_GROUP"
-    ? "gen_ai.span_kind_name"
-    : "gen_ai.span.kind";
+// Auto-detect: endpoint containing "sunfire" implies ALIBABA_GROUP
+function resolveSpanKindAttr(dialect?: string, endpoint?: string): string {
+  const sunfire = (endpoint ?? process.env["OTEL_EXPORTER_OTLP_ENDPOINT"] ?? "").includes("sunfire");
+  const d = dialect ?? process.env["LOONGSUITE_SEMCONV_DIALECT_NAME"];
+  return d === "ALIBABA_GROUP" || sunfire ? "gen_ai.span_kind_name" : "gen_ai.span.kind";
+}
+
+const SPAN_KIND_ATTR = resolveSpanKindAttr();
 
 const MAX_ATTR_LENGTH = 3_200_000;
 

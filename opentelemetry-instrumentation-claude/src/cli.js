@@ -20,10 +20,13 @@ const { createToolTitle, createEventData, addResponseToEventData, MAX_CONTENT_LE
 // Semantic convention dialect
 // LOONGSUITE_SEMCONV_DIALECT_NAME=ALIBABA_GROUP → gen_ai.span_kind_name
 // default (ALIBABA_CLOUD or unset)             → gen_ai.span.kind
+// Auto-detect: endpoint containing "sunfire" implies ALIBABA_GROUP
 // ---------------------------------------------------------------------------
-const SPAN_KIND_ATTR = process.env.LOONGSUITE_SEMCONV_DIALECT_NAME === "ALIBABA_GROUP"
-  ? "gen_ai.span_kind_name"
-  : "gen_ai.span.kind";
+const _sunfireDetected = (process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "").includes("sunfire");
+const SPAN_KIND_ATTR =
+  process.env.LOONGSUITE_SEMCONV_DIALECT_NAME === "ALIBABA_GROUP" || _sunfireDetected
+    ? "gen_ai.span_kind_name"
+    : "gen_ai.span.kind";
 
 // ---------------------------------------------------------------------------
 // 语言检测 / Language detection
