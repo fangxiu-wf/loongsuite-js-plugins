@@ -190,10 +190,12 @@ ok "Downloaded"
 
 info "Extracting to ${TARGET_DIR}..."
 tar -xzf "$TMP_DIR/plugin.tar.gz" -C "$TMP_DIR"
-if [[ -d "$TMP_DIR/${PLUGIN_NAME}" ]]; then
-  cp -rf "$TMP_DIR/${PLUGIN_NAME}/." "$TARGET_DIR/"
+EXTRACTED_DIR=$(find "$TMP_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+if [[ -n "$EXTRACTED_DIR" ]]; then
+  cp -rf "$EXTRACTED_DIR/." "$TARGET_DIR/"
 else
-  cp -rf "$TMP_DIR/." "$TARGET_DIR/"
+  error "Failed to extract plugin archive"
+  exit 1
 fi
 ok "Extracted"
 
