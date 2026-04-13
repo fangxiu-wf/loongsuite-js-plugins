@@ -144,6 +144,31 @@ npm test         # Run tests (Vitest)
 
 ---
 
+## Maintainer Release Pipeline
+
+This repo includes a manual GitHub Actions workflow:
+- `.github/workflows/release-openclaw-plugin.yml`
+
+Trigger it from **Actions → Release OpenClaw Plugin → Run workflow** and provide:
+- `version` (must match `package.json`, e.g. `0.1.2`)
+- `oss_path_prefix` (e.g. `opentelemetry-instrumentation-openclaw`)
+- `create_latest_alias` (`true` uploads an additional `/latest` path)
+- `dry_run` (`true` skips OSS upload + GitHub Release)
+
+Required repository secrets:
+- `OSS_BUCKET`
+- `OSS_ENDPOINT`
+- `OSS_ACCESS_KEY_ID`
+- `OSS_ACCESS_KEY_SECRET`
+
+Workflow outputs:
+- builds and packs `opentelemetry-instrumentation-openclaw.tar.gz`
+- uploads tarball + `install.sh` + `install-wget.sh` + `uninstall.sh` + `SHA256SUMS` to OSS
+- creates tag `opentelemetry-instrumentation-openclaw/v<version>`
+- creates a GitHub Release with uploaded assets
+
+---
+
 ## License
 
 Apache-2.0 — see [LICENSE](./LICENSE) for details.
