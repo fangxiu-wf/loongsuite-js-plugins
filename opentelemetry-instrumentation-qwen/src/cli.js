@@ -851,6 +851,7 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
             "gen_ai.response.model": model,
             "gen_ai.usage.input_tokens": ev.input_tokens || 0,
             "gen_ai.usage.output_tokens": ev.output_tokens || 0,
+            "gen_ai.usage.total_tokens": (ev.input_tokens || 0) + (ev.output_tokens || 0),
             "gen_ai.usage.cache_read.input_tokens": ev.cache_read_input_tokens || 0,
             "gen_ai.usage.cache_creation.input_tokens": ev.cache_creation_input_tokens || 0,
             "qwen_code.hook.type": "llm_call",
@@ -859,6 +860,11 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
         },
         parentContext()
       );
+
+      if (ev.stop_reason) {
+        const fr = mapStopReasonToFinishReason(ev.stop_reason);
+        llmSpan.setAttribute("gen_ai.response.finish_reasons", JSON.stringify([fr]));
+      }
 
       try {
         const systemPrompt = ev.system_prompt;
