@@ -202,6 +202,124 @@ function readProxyEvents(startTime, stopTime, deleteAfterRead = false, pid = nul
 }
 
 // ---------------------------------------------------------------------------
+// ARMS Message Schema transform helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Transform OpenAI-compatible input messages to ARMS gen_ai.input.messages schema.
+ * ARMS expects: [{role, parts: [{type:"text", content:"..."}, ...]}]
+ */
+function transformToArmsInputMessages(rawMessages) {
+  if (!Array.isArray(rawMessages)) return rawMessages;
+  const result = [];
+  for (const msg of rawMessages) {
+    if (!msg || typeof msg !== "object") continue;
+    const role = msg.role || "user";
+    const parts = [];
+
+    const content = msg.content;
+    if (typeof content === "string") {
+      if (content) parts.push({ type: "text", content });
+    } else if (Array.isArray(content)) {
+      for (const item of content) {
+        if (!item || typeof item !== "object") continue;
+        if (item.type === "text") {
+          parts.push({ type: "text", content: item.text || item.content || "" });
+        } else {
+          parts.push(item);
+        }
+      }
+    }
+
+    if (Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        const fn = tc.function || {};
+        let args = fn.arguments || fn["arguments"];
+        if (typeof args === "string") {
+          try { args = JSON.parse(args); } catch {}
+        }
+        parts.push({ type: "tool_call", id: tc.id || null, name: fn.name || "", arguments: args || null });
+      }
+    }
+
+    if (role === "tool") {
+      const toolCallId = msg.tool_call_id || null;
+      if (parts.length > 0) {
+        const responseText = parts.map(p => p.content || "").join("\n");
+        result.push({ role, parts: [{ type: "tool_call_response", id: toolCallId, response: responseText }] });
+        continue;
+      }
+    }
+
+    if (parts.length > 0) {
+      result.push({ role, parts });
+    }
+  }
+  return result;
+}
+
+/**
+ * Transform content_blocks from intercept.js to ARMS gen_ai.output.messages schema.
+ * ARMS expects: [{role:"assistant", parts:[...], finish_reason:"stop"}]
+ */
+function transformToArmsOutputMessages(contentBlocks, stopReason) {
+  if (!Array.isArray(contentBlocks) || contentBlocks.length === 0) return contentBlocks;
+  const parts = [];
+  for (const block of contentBlocks) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "text") {
+      parts.push({ type: "text", content: block.text || block.content || "" });
+    } else if (block.type === "tool_use") {
+      parts.push({ type: "tool_call", id: block.id || null, name: block.name || "", arguments: block.input || null });
+    } else if (block.type === "thinking") {
+      parts.push({ type: "thinking", content: block.thinking || "" });
+    } else {
+      parts.push(block);
+    }
+  }
+  const finishReason = mapStopReasonToFinishReason(stopReason);
+  return [{ role: "assistant", parts, finish_reason: finishReason }];
+}
+
+/**
+ * Transform system prompt to ARMS gen_ai.system_instructions schema.
+ * ARMS expects: [{"type":"text", "content":"..."}]
+ */
+function transformToArmsSystemInstructions(systemPrompt) {
+  if (systemPrompt === null || systemPrompt === undefined) return null;
+  if (typeof systemPrompt === "string") {
+    return [{ type: "text", content: systemPrompt }];
+  }
+  if (!Array.isArray(systemPrompt)) {
+    return [{ type: "text", content: String(systemPrompt) }];
+  }
+  const parts = [];
+  for (const item of systemPrompt) {
+    if (typeof item === "string") {
+      parts.push({ type: "text", content: item });
+    } else if (item && typeof item === "object") {
+      const c = item.content;
+      if (typeof c === "string") {
+        parts.push({ type: "text", content: c });
+      } else if (Array.isArray(c)) {
+        for (const sub of c) {
+          if (typeof sub === "string") {
+            parts.push({ type: "text", content: sub });
+          } else if (sub && typeof sub === "object") {
+            parts.push({ type: "text", content: sub.text || sub.content || "" });
+          }
+        }
+      } else if (item.text) {
+        parts.push({ type: "text", content: item.text });
+      } else {
+        parts.push({ type: "text", content: String(c || "") });
+      }
+    }
+  }
+  return parts.length > 0 ? parts : null;
+}
+
+// ---------------------------------------------------------------------------
 // OTel helpers
 // ---------------------------------------------------------------------------
 
@@ -219,12 +337,25 @@ function tsNs(sec) {
 }
 
 // ---------------------------------------------------------------------------
+// Debug logging (enabled via OTEL_QWEN_HOOK_DEBUG=1)
+// ---------------------------------------------------------------------------
+const DEBUG_LOG_PATH = path.join(os.tmpdir(), "otel-qwen-hook-debug.log");
+const _hookDebug = process.env.OTEL_QWEN_HOOK_DEBUG === "1";
+function debugLog(obj) {
+  if (!_hookDebug) return;
+  try {
+    fs.appendFileSync(DEBUG_LOG_PATH, JSON.stringify({ ts: new Date().toISOString(), ...obj }) + "\n");
+  } catch {}
+}
+
+// ---------------------------------------------------------------------------
 // stdin helper
 // ---------------------------------------------------------------------------
 function readStdinJson() {
+  let raw = "";
   try {
     const chunks = [];
-    const buf = Buffer.alloc(4096);
+    const buf = Buffer.alloc(65536);
     let fd;
     try {
       fd = fs.openSync("/dev/stdin", "rs");
@@ -233,13 +364,16 @@ function readStdinJson() {
     }
     let bytes;
     while ((bytes = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
-      chunks.push(buf.slice(0, bytes));
+      const copy = Buffer.alloc(bytes);
+      buf.copy(copy, 0, 0, bytes);
+      chunks.push(copy);
     }
     if (fd !== 0) try { fs.closeSync(fd); } catch {}
-    const raw = Buffer.concat(chunks).toString("utf-8");
+    raw = Buffer.concat(chunks).toString("utf-8");
     if (!raw.trim()) return {};
     return JSON.parse(raw);
-  } catch {
+  } catch (err) {
+    debugLog({ error: "readStdinJson_failed", message: String(err), raw_length: raw.length, raw_head: raw.slice(0, 200) });
     return {};
   }
 }
@@ -249,10 +383,9 @@ function readStdinJson() {
 // ---------------------------------------------------------------------------
 function reconstructStateFromEvents(sessionId, events, stopTime) {
   let startTime = stopTime;
+  let firstPromptTime = null;
   let prompt = "";
   let model = "unknown";
-  let inputTokens = 0;
-  let outputTokens = 0;
   let toolsUsedCount = 0;
   let turns = 0;
   const toolSet = new Set();
@@ -263,6 +396,7 @@ function reconstructStateFromEvents(sessionId, events, stopTime) {
       case "user_prompt_submit":
         if (!prompt) prompt = ev.prompt || "";
         if (ev.model) model = ev.model;
+        if (firstPromptTime === null) firstPromptTime = ev.timestamp || null;
         turns++;
         break;
       case "session_start":
@@ -273,12 +407,12 @@ function reconstructStateFromEvents(sessionId, events, stopTime) {
         if (ev.tool_name) toolSet.add(ev.tool_name);
         break;
       case "llm_call":
-        inputTokens += ev.input_tokens || 0;
-        outputTokens += ev.output_tokens || 0;
         if (ev.model && model === "unknown") model = ev.model;
         break;
     }
   }
+
+  if (firstPromptTime !== null) startTime = firstPromptTime;
 
   return {
     session_id: sessionId,
@@ -286,10 +420,30 @@ function reconstructStateFromEvents(sessionId, events, stopTime) {
     stop_time: stopTime,
     prompt,
     model,
-    metrics: { input_tokens: inputTokens, output_tokens: outputTokens, tools_used: toolsUsedCount, turns },
+    last_output: "",
+    metrics: { tools_used: toolsUsedCount, turns },
     tools_used: [...toolSet],
     events,
   };
+}
+
+function extractOutputAndTokensFromEvents(events) {
+  let lastOutput = "";
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let model = "unknown";
+  for (const ev of events) {
+    if (ev.type !== "llm_call") continue;
+    inputTokens += ev.input_tokens || 0;
+    outputTokens += ev.output_tokens || 0;
+    if (ev.model) model = ev.model;
+    if (ev.output_content) {
+      const raw = ev.output_content;
+      lastOutput = typeof raw === "string" ? raw : JSON.stringify(raw);
+      if (lastOutput.length > MAX_CONTENT_LENGTH) lastOutput = lastOutput.slice(0, MAX_CONTENT_LENGTH) + "...(truncated)";
+    }
+  }
+  return { lastOutput, inputTokens, outputTokens, model };
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +572,17 @@ function matchSubagentsToTools(events, subagentWindows, ownedIndices) {
 // ---------------------------------------------------------------------------
 // replayEventsAsSpans
 // ---------------------------------------------------------------------------
+function mapStopReasonToFinishReason(stopReason) {
+  if (!stopReason) return "stop";
+  const sr = stopReason.toLowerCase();
+  if (sr === "stop" || sr === "end_turn") return "stop";
+  if (sr === "tool_calls" || sr === "tool_use") return "tool_call";
+  if (sr === "length" || sr === "max_tokens") return "length";
+  if (sr === "content_filter") return "content_filter";
+  if (sr === "error") return "error";
+  return stopReason;
+}
+
 function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
   const { ownedIndices, stopIdxToWindow, subagentToToolUseId } = buildSubagentInfo(events);
 
@@ -426,6 +591,7 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
   let currentTurnCtx = null;
   let turnIdx = 0;
   let lastCompactSpan = null;
+  let lastLlmStopReason = "";
 
   function parentContext() {
     return currentTurnCtx !== null ? currentTurnCtx : parentCtx;
@@ -440,22 +606,21 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
 
     if (evType === "user_prompt_submit") {
       if (currentTurnSpan !== null) {
+        currentTurnSpan.setAttribute("gen_ai.react.finish_reason", mapStopReasonToFinishReason(lastLlmStopReason));
         currentTurnSpan.end(hrTime(evTs));
         currentTurnSpan = null;
         currentTurnCtx = null;
       }
+      lastLlmStopReason = "";
 
       turnIdx++;
-      const p = ev.prompt || "";
-      const preview = p.length > 50 ? p.slice(0, 50) + "..." : p;
-      const label = preview ? `👤 Turn ${turnIdx}: ${preview}` : `👤 Turn ${turnIdx}`;
       currentTurnSpan = tracer.startSpan(
-        label,
+        `react step ${turnIdx}`,
         {
           startTime: hrTime(evTs),
           attributes: {
             "turn.index": turnIdx,
-            "gen_ai.input.messages": p,
+            "gen_ai.operation.name": "react",
             "gen_ai.react.round": turnIdx,
             [SPAN_KIND_ATTR]: "STEP",
           },
@@ -485,7 +650,7 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
       }
 
       const toolSpan = tracer.startSpan(
-        `🔧 ${toolTitle}`,
+        `execute_tool ${toolName}`,
         { startTime: hrTime(evTs), attributes: attrs },
         parentContext()
       );
@@ -529,7 +694,7 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
         toolSpan.end(hrTime(evTs));
       } else {
         const failSpan = tracer.startSpan(
-          `🔧 ${toolName} (failed)`,
+          `execute_tool ${toolName}`,
           {
             startTime: hrTime(evTs),
             attributes: {
@@ -550,10 +715,11 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
 
     } else if (evType === "pre_compact") {
       lastCompactSpan = tracer.startSpan(
-        "🗜️ Context compaction",
+        "run_task context_compaction",
         {
           startTime: hrTime(evTs),
           attributes: {
+            "gen_ai.operation.name": "run_task",
             "compact.trigger": ev.trigger || "unknown",
             "compact.has_custom_instructions": !!ev.has_custom_instructions,
             [SPAN_KIND_ATTR]: "TASK",
@@ -570,10 +736,10 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
         lastCompactSpan = null;
       } else {
         const span = tracer.startSpan(
-          "🗜️ Context compaction (complete)",
+          "run_task context_compaction",
           {
             startTime: hrTime(evTs),
-            attributes: { "compact.trigger": ev.trigger || "unknown", "compact.summary": ev.compact_summary || "", [SPAN_KIND_ATTR]: "TASK" },
+            attributes: { "gen_ai.operation.name": "run_task", "compact.trigger": ev.trigger || "unknown", "compact.summary": ev.compact_summary || "", [SPAN_KIND_ATTR]: "TASK" },
           },
           parentCtx
         );
@@ -583,10 +749,11 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
     } else if (evType === "notification") {
       const notifMsg = ev.message || "";
       const span = tracer.startSpan(
-        notifMsg ? `🔔 ${notifMsg.slice(0, 60)}` : "🔔 Notification",
+        "run_task notification",
         {
           startTime: hrTime(evTs),
           attributes: {
+            "gen_ai.operation.name": "run_task",
             "notification.message": notifMsg,
             "notification.level": ev.level || "info",
             "notification.title": ev.title || "",
@@ -600,13 +767,15 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
     } else if (evType === "subagent_start") {
       // Unmatched start (no stop) — create marker span
       const agentId = ev.agent_id || "";
+      const agentName = ev.agent_type || agentId || "unknown";
       const span = tracer.startSpan(
-        agentId ? `🤖 Subagent started: ${agentId.slice(0, 30)}` : "🤖 Subagent started",
+        `invoke_agent ${agentName}`,
         {
           startTime: hrTime(evTs),
           attributes: {
             "gen_ai.agent.id": agentId,
-            "gen_ai.agent.type": ev.agent_type || "",
+            "gen_ai.agent.name": ev.agent_type || "",
+            "gen_ai.operation.name": "invoke_agent",
             "qwen_code.hook.type": evType,
             [SPAN_KIND_ATTR]: "AGENT",
           },
@@ -625,13 +794,14 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
           agentParentCtx = trace.setSpan(context.active(), openTools[parentToolUseId]);
         }
 
+        const agentName = win.agent_type || win.agent_id || "unknown";
         const containerSpan = tracer.startSpan(
-          `🤖 Subagent: ${win.agent_type || win.agent_id || "unknown"}`,
+          `invoke_agent ${agentName}`,
           {
             startTime: hrTime(win.startTime),
             attributes: {
               "gen_ai.agent.id": win.agent_id,
-              "gen_ai.agent.type": win.agent_type,
+              "gen_ai.agent.name": win.agent_type || win.agent_id || "",
               "gen_ai.operation.name": "invoke_agent",
               "subagent.stop_reason": ev.stop_reason || "end_turn",
               [SPAN_KIND_ATTR]: "AGENT",
@@ -649,11 +819,12 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
         // Unmatched stop — create marker span
         const childSid = ev.agent_id || ev.subagent_session_id || "unknown";
         const span = tracer.startSpan(
-          "🤖 Subagent completed",
+          `invoke_agent ${childSid}`,
           {
             startTime: hrTime(evTs),
             attributes: {
               "gen_ai.agent.id": childSid,
+              "gen_ai.agent.name": childSid,
               "subagent.stop_reason": ev.stop_reason || "end_turn",
               "gen_ai.operation.name": "invoke_agent",
               "qwen_code.hook.type": evType,
@@ -667,41 +838,21 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
 
     } else if (evType === "llm_call") {
       const model = ev.model || "unknown";
-      const inputMessages = ev.input_messages || [];
-
-      let lastUserPreview = "";
-      if (Array.isArray(inputMessages)) {
-        for (let mi = inputMessages.length - 1; mi >= 0; mi--) {
-          const m = inputMessages[mi];
-          if (m && m.role === "user") {
-            const content = m.content;
-            if (typeof content === "string") {
-              lastUserPreview = content.slice(0, 40);
-            } else if (Array.isArray(content)) {
-              for (const block of content) {
-                if (block && block.type === "text") { lastUserPreview = (block.text || "").slice(0, 40); break; }
-              }
-            }
-            break;
-          }
-        }
-      }
-
-      const label = lastUserPreview ? `🧠 LLM: ${lastUserPreview}...` : `🧠 LLM call (${model})`;
       const requestStart = ev.request_start_time || evTs;
       const llmSpan = tracer.startSpan(
-        label,
+        `chat ${model}`,
         {
           startTime: hrTime(requestStart),
           attributes: {
             "gen_ai.system": "qwen",
+            "gen_ai.provider.name": "dashscope",
             "gen_ai.operation.name": "chat",
             "gen_ai.request.model": model,
             "gen_ai.response.model": model,
             "gen_ai.usage.input_tokens": ev.input_tokens || 0,
             "gen_ai.usage.output_tokens": ev.output_tokens || 0,
-            "gen_ai.usage.cache_read_input_tokens": ev.cache_read_input_tokens || 0,
-            "gen_ai.usage.cache_creation_input_tokens": ev.cache_creation_input_tokens || 0,
+            "gen_ai.usage.cache_read.input_tokens": ev.cache_read_input_tokens || 0,
+            "gen_ai.usage.cache_creation.input_tokens": ev.cache_creation_input_tokens || 0,
             "qwen_code.hook.type": "llm_call",
             [SPAN_KIND_ATTR]: "LLM",
           },
@@ -710,19 +861,19 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
       );
 
       try {
-        let rawInput = ev.input_messages || [];
         const systemPrompt = ev.system_prompt;
         if (systemPrompt !== null && systemPrompt !== undefined) {
-          let systemText = "";
-          if (Array.isArray(systemPrompt)) {
-            systemText = systemPrompt.map((item) => (typeof item === "string" ? item : (item && item.text) || "")).join("\n");
-          } else {
-            systemText = String(systemPrompt);
+          const sysInstructions = transformToArmsSystemInstructions(systemPrompt);
+          if (sysInstructions) {
+            let serialized = JSON.stringify(sysInstructions);
+            if (serialized.length > MAX_CONTENT_LENGTH) serialized = serialized.slice(0, MAX_CONTENT_LENGTH) + "...(truncated)";
+            llmSpan.setAttribute("gen_ai.system_instructions", serialized);
           }
-          rawInput = [{ role: "system", content: systemText }, ...(Array.isArray(rawInput) ? rawInput : [])];
         }
+        const rawInput = ev.input_messages || [];
         if (rawInput && (Array.isArray(rawInput) ? rawInput.length > 0 : true)) {
-          let serialized = typeof rawInput === "string" ? rawInput : JSON.stringify(rawInput);
+          const armsInput = Array.isArray(rawInput) ? transformToArmsInputMessages(rawInput) : rawInput;
+          let serialized = typeof armsInput === "string" ? armsInput : JSON.stringify(armsInput);
           if (serialized.length > MAX_CONTENT_LENGTH) serialized = serialized.slice(0, MAX_CONTENT_LENGTH) + "...(truncated)";
           llmSpan.setAttribute("gen_ai.input.messages", serialized);
         }
@@ -731,11 +882,14 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
       try {
         const rawOutput = ev.output_content;
         if (rawOutput !== null && rawOutput !== undefined) {
-          let serialized = typeof rawOutput === "string" ? rawOutput : JSON.stringify(rawOutput);
+          const armsOutput = Array.isArray(rawOutput) ? transformToArmsOutputMessages(rawOutput, ev.stop_reason || "") : rawOutput;
+          let serialized = typeof armsOutput === "string" ? armsOutput : JSON.stringify(armsOutput);
           if (serialized.length > MAX_CONTENT_LENGTH) serialized = serialized.slice(0, MAX_CONTENT_LENGTH) + "...(truncated)";
           llmSpan.setAttribute("gen_ai.output.messages", serialized);
         }
       } catch {}
+
+      if (ev.stop_reason) lastLlmStopReason = ev.stop_reason;
 
       if (ev.is_error) {
         llmSpan.setAttribute("error", true);
@@ -750,7 +904,10 @@ function replayEventsAsSpans(tracer, events, parentCtx, stopTime) {
 
   for (const orphan of Object.values(openTools)) orphan.end(hrTime(stopTime));
   if (lastCompactSpan) lastCompactSpan.end(hrTime(stopTime));
-  if (currentTurnSpan !== null) currentTurnSpan.end(hrTime(stopTime));
+  if (currentTurnSpan !== null) {
+    currentTurnSpan.setAttribute("gen_ai.react.finish_reason", mapStopReasonToFinishReason(lastLlmStopReason));
+    currentTurnSpan.end(hrTime(stopTime));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -771,7 +928,7 @@ async function exportSessionTrace(state, stopReason = "end_turn") {
   const stopTime = typeof state.stop_time === "number" ? state.stop_time : Date.now() / 1000;
 
   const promptPreview = prompt.length > 60 ? prompt.slice(0, 60) + "..." : prompt;
-  const spanTitle = prompt ? `🤖 ${promptPreview}` : "Qwen Session";
+  const spanTitle = prompt ? `run_task ${promptPreview}` : "run_task qwen-code-session";
 
   const tracer = trace.getTracer("opentelemetry-instrumentation-qwen");
 
@@ -786,18 +943,24 @@ async function exportSessionTrace(state, stopReason = "end_turn") {
     }
   } catch {}
 
+  const extracted = extractOutputAndTokensFromEvents(events);
+  const lastOutput = extracted.lastOutput;
+  const resolvedModel = (state.model && state.model !== "unknown") ? state.model : extracted.model;
+
   const sessionSpan = tracer.startSpan(spanTitle, {
     startTime: hrTime(startTime),
     attributes: {
-      "gen_ai.input.messages": prompt,
+      "input.value": prompt,
+      "input.mime_type": "text/plain",
+      "output.value": lastOutput,
+      "output.mime_type": "text/plain",
+      "gen_ai.operation.name": "run_task",
       "gen_ai.session.id": sessionId,
       "gen_ai.conversation.id": sessionId,
       "gen_ai.system": "qwen",
       "gen_ai.framework": "qwen-code",
-      "gen_ai.request.model": state.model || "unknown",
-      "gen_ai.response.model": state.model || "unknown",
-      "gen_ai.usage.input_tokens": metrics.input_tokens || 0,
-      "gen_ai.usage.output_tokens": metrics.output_tokens || 0,
+      "gen_ai.request.model": resolvedModel,
+      "gen_ai.response.model": resolvedModel,
       tools_used: metrics.tools_used || 0,
       tool_names: (state.tools_used || []).join(","),
       turns: metrics.turns || 0,
@@ -925,6 +1088,7 @@ function removeAliasFromFile(filePath) {
 // ---------------------------------------------------------------------------
 function cmdUserPromptSubmit() {
   const event = readStdinJson();
+  debugLog({ hook: "UserPromptSubmit", session_id: event.session_id || "MISSING", prompt_len: (event.prompt || "").length });
   return cmdUserPromptSubmitWithEvent(event);
 }
 
@@ -956,11 +1120,13 @@ function cmdSessionStartWithEvent(event) {
 
 function cmdPreToolUse() {
   const event = readStdinJson();
+  debugLog({ hook: "PreToolUse", session_id: event.session_id || "MISSING", tool_name: event.tool_name, tool_use_id: event.tool_use_id, stdin_keys: Object.keys(event) });
   return cmdPreToolUseWithEvent(event);
 }
 
 function cmdPreToolUseWithEvent(event) {
   const sessionId = event.session_id || require("crypto").randomUUID();
+  if (!event.session_id) debugLog({ warn: "missing_session_id", type: "pre_tool_use", generated_id: sessionId, tool_name: event.tool_name });
   appendEvent(sessionId, {
     type: "pre_tool_use",
     timestamp: Date.now() / 1000,
@@ -972,11 +1138,13 @@ function cmdPreToolUseWithEvent(event) {
 
 function cmdPostToolUse() {
   const event = readStdinJson();
+  debugLog({ hook: "PostToolUse", session_id: event.session_id || "MISSING", tool_name: event.tool_name, tool_use_id: event.tool_use_id, has_tool_response: event.tool_response !== undefined, stdin_keys: Object.keys(event) });
   return cmdPostToolUseWithEvent(event);
 }
 
 function cmdPostToolUseWithEvent(event) {
   const sessionId = event.session_id || require("crypto").randomUUID();
+  if (!event.session_id) debugLog({ warn: "missing_session_id", type: "post_tool_use", generated_id: sessionId, tool_name: event.tool_name });
   appendEvent(sessionId, {
     type: "post_tool_use",
     timestamp: Date.now() / 1000,
@@ -988,11 +1156,13 @@ function cmdPostToolUseWithEvent(event) {
 
 function cmdPostToolUseFailure() {
   const event = readStdinJson();
+  debugLog({ hook: "PostToolUseFailure", session_id: event.session_id || "MISSING", tool_name: event.tool_name, tool_use_id: event.tool_use_id, stdin_keys: Object.keys(event) });
   return cmdPostToolUseFailureWithEvent(event);
 }
 
 function cmdPostToolUseFailureWithEvent(event) {
   const sessionId = event.session_id || require("crypto").randomUUID();
+  if (!event.session_id) debugLog({ warn: "missing_session_id", type: "post_tool_use_failure", generated_id: sessionId, tool_name: event.tool_name });
   appendEvent(sessionId, {
     type: "post_tool_use_failure",
     timestamp: Date.now() / 1000,
@@ -1109,6 +1279,7 @@ async function cmdStop() {
   const stopTime = Date.now() / 1000;
 
   let events = loadEvents(sessionId);
+  debugLog({ hook: "Stop", session_id: event.session_id || "MISSING", event_count: events.length, event_types: events.map(e => e.type) });
 
   // Fallback: try legacy JSON state if JSONL is empty
   if (events.length === 0) {
@@ -1304,6 +1475,11 @@ module.exports = {
   _removeAliasFromFile: removeAliasFromFile,
   _removeHooksFromSettings: removeHooksFromSettings,
   _reconstructStateFromEvents: reconstructStateFromEvents,
+  _extractOutputAndTokensFromEvents: extractOutputAndTokensFromEvents,
+  _transformToArmsInputMessages: transformToArmsInputMessages,
+  _transformToArmsOutputMessages: transformToArmsOutputMessages,
+  _transformToArmsSystemInstructions: transformToArmsSystemInstructions,
+  _mapStopReasonToFinishReason: mapStopReasonToFinishReason,
   _buildSubagentInfo: buildSubagentInfo,
   _matchSubagentsToTools: matchSubagentsToTools,
 

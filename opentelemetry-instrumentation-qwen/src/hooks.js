@@ -80,23 +80,12 @@ function createEventData(toolName, toolInput = null) {
   const eventData = { "gen_ai.tool.name": toolName };
   if (!toolInput || Object.keys(toolInput).length === 0) return eventData;
 
-  const summaryParts = [];
-  for (const [key, value] of Object.entries(toolInput)) {
-    if (
-      (typeof value === "string" && value.length < MAX_CONTENT_LENGTH) ||
-      typeof value === "number" ||
-      typeof value === "boolean" ||
-      value === null
-    ) {
-      summaryParts.push(`${key}=${value}`);
-    } else if (Array.isArray(value)) {
-      summaryParts.push(`${key}=[...${value.length} items]`);
-    } else if (typeof value === "object") {
-      summaryParts.push(`${key}={...${Object.keys(value).length} keys}`);
-    }
-  }
-  if (summaryParts.length > 0) {
-    eventData["gen_ai.tool.call.arguments"] = summaryParts.slice(0, 5).join(", ");
+  try {
+    let serialized = JSON.stringify(toolInput);
+    if (serialized.length > MAX_CONTENT_LENGTH) serialized = serialized.slice(0, MAX_CONTENT_LENGTH) + "...(truncated)";
+    eventData["gen_ai.tool.call.arguments"] = serialized;
+  } catch {
+    eventData["gen_ai.tool.call.arguments"] = String(toolInput);
   }
 
   for (const [key, value] of Object.entries(toolInput)) {
@@ -120,69 +109,22 @@ function addResponseToEventData(eventData, toolResponse) {
     return;
   }
 
-  eventData["response_type"] = typeof toolResponse === "object"
-    ? (Array.isArray(toolResponse) ? "list" : "dict")
-    : typeof toolResponse;
-
-  if (toolResponse !== null && typeof toolResponse === "object" && !Array.isArray(toolResponse)) {
-    const hasError =
+  if (toolResponse !== null && typeof toolResponse === "object") {
+    const hasError = !Array.isArray(toolResponse) && (
       (toolResponse["error"] !== undefined && toolResponse["error"]) ||
-      (toolResponse["isError"] !== undefined && toolResponse["isError"]);
+      (toolResponse["isError"] !== undefined && toolResponse["isError"])
+    );
     eventData["status"] = hasError ? "error" : "success";
-
-    if (hasError) {
-      const errorMsg = String(toolResponse["error"] || "Unknown error").slice(0, MAX_CONTENT_LENGTH);
-      eventData["gen_ai.tool.call.result"] = `Error: ${errorMsg}`;
-    } else {
-      const summaryParts = [];
-      for (const key of ["result", "content", "message", "output", "stdout"]) {
-        if (key in toolResponse) {
-          const val = String(toolResponse[key]);
-          summaryParts.push(
-            val.length < MAX_CONTENT_LENGTH ? `${key}=${val}` : `${key}=...(${val.length} chars)`
-          );
-        }
-      }
-      if (summaryParts.length > 0) {
-        eventData["gen_ai.tool.call.result"] = summaryParts.slice(0, 3).join(", ");
-      } else {
-        const keys = Object.keys(toolResponse);
-        eventData["gen_ai.tool.call.result"] = `${keys.length} fields: [${keys.slice(0, 5).join(", ")}]`;
-      }
-    }
-
-    for (const [key, value] of Object.entries(toolResponse)) {
-      const strVal = String(value);
-      if (strVal.length < MAX_CONTENT_LENGTH) {
-        eventData[`response.${key}`] = strVal;
-      } else {
-        eventData[`response.${key}`] =
-          strVal.slice(0, MAX_CONTENT_LENGTH) + `... (truncated, full size: ${strVal.length} chars)`;
-      }
-    }
-  } else if (Array.isArray(toolResponse)) {
-    eventData["status"] = "success";
-    eventData["gen_ai.tool.call.result"] = `List with ${toolResponse.length} item${toolResponse.length !== 1 ? "s" : ""}`;
-    eventData["response.count"] = toolResponse.length;
-    if (toolResponse.length > 0) {
-      eventData["response.first_item"] = String(toolResponse[0]).slice(0, MAX_CONTENT_LENGTH);
-    }
-  } else if (typeof toolResponse === "string") {
-    eventData["status"] = "success";
-    if (toolResponse.length < MAX_CONTENT_LENGTH) {
-      eventData["gen_ai.tool.call.result"] = toolResponse;
-      eventData["response"] = toolResponse;
-    } else {
-      eventData["gen_ai.tool.call.result"] = toolResponse.slice(0, MAX_CONTENT_LENGTH) + "...";
-      eventData["response"] = toolResponse.slice(0, MAX_CONTENT_LENGTH);
-    }
   } else {
     eventData["status"] = "success";
-    const strVal = String(toolResponse);
-    eventData["gen_ai.tool.call.result"] = strVal.slice(0, MAX_CONTENT_LENGTH);
-    eventData["response"] = strVal.length > MAX_CONTENT_LENGTH
-      ? strVal.slice(0, MAX_CONTENT_LENGTH)
-      : strVal;
+  }
+
+  try {
+    let serialized = typeof toolResponse === "string" ? toolResponse : JSON.stringify(toolResponse);
+    if (serialized.length > MAX_CONTENT_LENGTH) serialized = serialized.slice(0, MAX_CONTENT_LENGTH) + "...(truncated)";
+    eventData["gen_ai.tool.call.result"] = serialized;
+  } catch {
+    eventData["gen_ai.tool.call.result"] = String(toolResponse);
   }
 }
 

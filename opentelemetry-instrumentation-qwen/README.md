@@ -4,7 +4,7 @@
 
 ---
 
-## ✨ 特性
+## 特性
 
 - **Hook 驱动**：利用 Qwen Code 的 `settings.json` hook 机制（`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`PostToolUseFailure`、`Stop` 等），无需修改任何业务代码
 - **LLM 调用级追踪**：`intercept.js` 在进程内拦截 HTTP 请求，记录 DashScope / OpenAI-compatible API 的 token 用量、输入输出消息，写入 JSONL 日志
@@ -15,7 +15,7 @@
 
 ---
 
-## 📦 环境要求
+## 环境要求
 
 | 依赖 | 版本 |
 |------|------|
@@ -24,7 +24,7 @@
 
 ---
 
-## ⚡ 快速安装（一行命令）
+## 快速安装（一行命令）
 
 ```bash
 curl -fsSL https://your-cdn/remote-install.sh | bash -s -- \
@@ -55,7 +55,7 @@ export QWEN_TELEMETRY_DEBUG=1
 
 ---
 
-## 🚀 安装方法
+## 安装方法
 
 ### 方式一：npm 全局安装（推荐）
 
@@ -80,7 +80,7 @@ bash scripts/install.sh
 
 ---
 
-## ⚙️ 配置说明
+## 配置说明
 
 所有配置通过**环境变量**完成，无需配置文件。
 
@@ -112,7 +112,7 @@ export QWEN_TELEMETRY_DEBUG=1
 
 ---
 
-## 📖 使用方法
+## 使用方法
 
 ### 快速开始
 
@@ -158,41 +158,41 @@ cat ~/.qwen/settings.json
 
 ---
 
-## 🌲 Trace 层级结构
+## Trace 层级结构
 
 一次 Qwen Code session 会生成如下树状 Span 结构：
 
 ```
-🤖 <prompt 预览>  (TASK — session 根 Span)
-├── 👤 Turn 1: <用户输入>  (STEP)
-│   ├── 🧠 LLM call  (LLM)              ← intercept.js 捕获
-│   ├── 🔧 Read: /path/to/file.py  (TOOL)
-│   ├── 🔧 Shell: ls -la /tmp  (TOOL)
-│   ├── 🔧 agent: <任务描述>  (TOOL)    ← 顺序 subagent
-│   │   └── 🤖 Subagent: Custom  (AGENT) ← AGENT 嵌套在 TOOL 下
-│   │       ├── 🧠 LLM call  (LLM)      ← subagent 的 LLM 嵌套在 AGENT 下
-│   │       └── 🔧 Write: ...  (TOOL)
-│   └── 🧠 LLM call  (LLM)              ← 主 agent 的后续 LLM
-├── 👤 Turn 2: <下一轮输入>  (STEP)
-│   └── 🔧 Write: /path/to/output.py  (TOOL)
-├── 🗜️ Context compaction  (TASK)         ← PreCompact/PostCompact hook
-└── 🔔 Notification: 任务完成  (TASK)     ← Notification hook
+run_task <prompt 预览>  (TASK — session 根 Span)
+├── react step 1  (STEP)
+│   ├── chat qwen-max  (LLM)              ← intercept.js 捕获
+│   ├── execute_tool read_file  (TOOL)
+│   ├── execute_tool bash  (TOOL)
+│   ├── execute_tool agent  (TOOL)        ← 顺序 subagent
+│   │   └── invoke_agent Explore  (AGENT) ← AGENT 嵌套在 TOOL 下
+│   │       ├── chat qwen-max  (LLM)      ← subagent 的 LLM 嵌套在 AGENT 下
+│   │       └── execute_tool write_file  (TOOL)
+│   └── chat qwen-max  (LLM)              ← 主 agent 的后续 LLM
+├── react step 2  (STEP)
+│   └── execute_tool write_file  (TOOL)
+├── run_task context_compaction  (TASK)    ← PreCompact/PostCompact hook
+└── run_task notification  (TASK)          ← Notification hook
 ```
 
-每个 Span 上会携带：
-- **session Span**：`gen_ai.session.id`、`gen_ai.usage.input_tokens`、`gen_ai.usage.output_tokens`、`turns`、`tools_used`、`gen_ai.span.kind=TASK`
-- **turn Span**：`turn.index`、`gen_ai.input.messages`、`gen_ai.span.kind=STEP`
-- **tool Span**：`gen_ai.tool.name`、`gen_ai.tool.call.arguments`、`gen_ai.tool.call.result`、`gen_ai.span.kind=TOOL`
-- **LLM call Span**：`gen_ai.request.model`、`gen_ai.usage.input_tokens`、`gen_ai.input.messages`、`gen_ai.output.messages`、`gen_ai.span.kind=LLM`
-- **subagent Span**：`gen_ai.agent.id`、`gen_ai.agent.type`、`gen_ai.operation.name=invoke_agent`、`gen_ai.span.kind=AGENT`
+每个 Span 上会携带（遵循 ARMS GenAI 语义规范）：
+- **session Span (TASK)**：`input.value`、`output.value`、`gen_ai.operation.name=run_task`、`gen_ai.session.id`、`gen_ai.framework=qwen-code`
+- **turn Span (STEP)**：`gen_ai.operation.name=react`、`gen_ai.react.round`、`gen_ai.react.finish_reason`
+- **tool Span (TOOL)**：`gen_ai.operation.name=execute_tool`、`gen_ai.tool.name`、`gen_ai.tool.call.arguments`（JSON）、`gen_ai.tool.call.result`（JSON）
+- **LLM call Span (LLM)**：`gen_ai.operation.name=chat`、`gen_ai.provider.name=dashscope`、`gen_ai.request.model`、`gen_ai.usage.input_tokens`、`gen_ai.input.messages`（ARMS Schema）、`gen_ai.output.messages`（ARMS Schema）、`gen_ai.system_instructions`
+- **subagent Span (AGENT)**：`gen_ai.operation.name=invoke_agent`、`gen_ai.agent.id`、`gen_ai.agent.name`
 
-### ⚠️ 已知局限：并行 Subagent 的 LLM 归属
+### 已知局限：并行 Subagent 的 LLM 归属
 
 当 Qwen Code 同时启动多个 subagent（并行执行）时，各 subagent 的 LLM API 调用会在同一进程内交替发生。由于 HTTP 拦截层（`intercept.js`）捕获的 LLM 调用不携带 subagent 标识符，插件无法判断某次 LLM 调用属于哪个具体的 subagent。
 
 **行为表现**：
-- **顺序 subagent**（一个接一个执行）：LLM 调用正确嵌套在对应的 AGENT 容器 span 下 ✅
-- **并行 subagent**（多个同时执行）：TOOL → AGENT 容器层级正确（有完整时间范围），但 LLM 调用会平铺在 Turn span 下而非嵌套在各自的 AGENT 下 ⚠️
+- **顺序 subagent**（一个接一个执行）：LLM 调用正确嵌套在对应的 AGENT 容器 span 下
+- **并行 subagent**（多个同时执行）：TOOL → AGENT 容器层级正确（有完整时间范围），但 LLM 调用会平铺在 Turn span 下而非嵌套在各自的 AGENT 下
 
 **根因**：qwen-code 的 subagent 在进程内执行，共享同一个 HTTP 通道。LLM 请求中没有任何字段关联到特定 subagent，因此在时间窗口重叠时无法准确归属。
 
@@ -200,7 +200,7 @@ cat ~/.qwen/settings.json
 
 ---
 
-## 🖥️ CLI 命令参考
+## CLI 命令参考
 
 ```bash
 # 安装管理
@@ -229,7 +229,7 @@ otel-qwen-hook notification          # Notification hook
 
 ---
 
-## 📁 项目结构
+## 项目结构
 
 ```
 opentelemetry-instrumentation-qwen/
@@ -261,7 +261,7 @@ opentelemetry-instrumentation-qwen/
 
 ---
 
-## 🔧 工作原理
+## 工作原理
 
 1. **hook 命令注册**：`otel-qwen-hook install` 将 12 个 hook 命令写入 `~/.qwen/settings.json`。Qwen Code 在每个生命周期事件时以子进程方式调用对应命令，并将事件 JSON 通过 stdin 传入。
 
@@ -286,7 +286,7 @@ opentelemetry-instrumentation-qwen/
 
 ---
 
-## 🧪 测试
+## 测试
 
 ```bash
 # 运行所有测试
@@ -301,6 +301,6 @@ npm run test:watch
 
 ---
 
-## 📝 License
+## License
 
 Apache-2.0

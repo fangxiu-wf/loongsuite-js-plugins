@@ -54,9 +54,16 @@ describe("hooks.js", () => {
       expect(data["input.content"]).toBe("hello");
     });
 
-    it("includes gen_ai.tool.call.arguments summary", () => {
+    it("includes gen_ai.tool.call.arguments as JSON string", () => {
       const data = createEventData("Shell", { command: "ls -la" });
-      expect(data["gen_ai.tool.call.arguments"]).toContain("command=ls -la");
+      expect(data["gen_ai.tool.call.arguments"]).toBe('{"command":"ls -la"}');
+    });
+
+    it("includes gen_ai.tool.call.arguments for complex input", () => {
+      const data = createEventData("Write", { file_path: "/test.js", content: "hello" });
+      const parsed = JSON.parse(data["gen_ai.tool.call.arguments"]);
+      expect(parsed.file_path).toBe("/test.js");
+      expect(parsed.content).toBe("hello");
     });
   });
 
@@ -75,18 +82,21 @@ describe("hooks.js", () => {
       expect(data["gen_ai.tool.call.result"]).toBe("file contents here");
     });
 
-    it("handles object response with result field", () => {
+    it("handles object response as JSON string", () => {
       const data = {};
       addResponseToEventData(data, { result: "success", count: 42 });
       expect(data.status).toBe("success");
-      expect(data["gen_ai.tool.call.result"]).toContain("result=success");
+      const parsed = JSON.parse(data["gen_ai.tool.call.result"]);
+      expect(parsed.result).toBe("success");
+      expect(parsed.count).toBe(42);
     });
 
-    it("handles error response", () => {
+    it("handles error response with status error", () => {
       const data = {};
       addResponseToEventData(data, { error: "File not found" });
       expect(data.status).toBe("error");
-      expect(data["gen_ai.tool.call.result"]).toContain("Error: File not found");
+      const parsed = JSON.parse(data["gen_ai.tool.call.result"]);
+      expect(parsed.error).toBe("File not found");
     });
 
     it("handles isError response", () => {
@@ -95,11 +105,21 @@ describe("hooks.js", () => {
       expect(data.status).toBe("error");
     });
 
-    it("handles array response", () => {
+    it("handles array response as JSON string", () => {
       const data = {};
       addResponseToEventData(data, ["a", "b", "c"]);
       expect(data.status).toBe("success");
-      expect(data["gen_ai.tool.call.result"]).toContain("3 items");
+      const parsed = JSON.parse(data["gen_ai.tool.call.result"]);
+      expect(parsed).toEqual(["a", "b", "c"]);
+    });
+
+    it("handles object with llmContent and returnDisplay as JSON", () => {
+      const data = {};
+      addResponseToEventData(data, { llmContent: "No files found", returnDisplay: "No files found" });
+      expect(data.status).toBe("success");
+      const parsed = JSON.parse(data["gen_ai.tool.call.result"]);
+      expect(parsed.llmContent).toBe("No files found");
+      expect(parsed.returnDisplay).toBe("No files found");
     });
   });
 

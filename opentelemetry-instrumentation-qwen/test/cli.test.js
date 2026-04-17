@@ -66,6 +66,11 @@ const {
   _cmdNotificationWithEvent,
   _replayEventsAsSpans,
   _reconstructStateFromEvents,
+  _extractOutputAndTokensFromEvents,
+  _transformToArmsInputMessages,
+  _transformToArmsOutputMessages,
+  _transformToArmsSystemInstructions,
+  _mapStopReasonToFinishReason,
   _buildSubagentInfo,
 } = require("../src/cli");
 
@@ -257,7 +262,7 @@ describe("cli.js", () => {
 
       expect(mockTracer.startSpan).toHaveBeenCalled();
       const call = mockTracer.startSpan.mock.calls[0];
-      expect(call[0]).toContain("Turn 1");
+      expect(call[0]).toBe("react step 1");
     });
 
     it("creates tool span for pre_tool_use + post_tool_use pair", () => {
@@ -300,7 +305,7 @@ describe("cli.js", () => {
 
       expect(mockTracer.startSpan).toHaveBeenCalled();
       const call = mockTracer.startSpan.mock.calls[0];
-      expect(call[0]).toContain("LLM");
+      expect(call[0]).toBe("chat qwen-max");
     });
 
     it("handles notification events", () => {
@@ -338,11 +343,11 @@ describe("cli.js", () => {
       _replayEventsAsSpans(mockTracer, events, {}, 106);
 
       const spanNames = mockTracer.startSpan.mock.calls.map(c => c[0]);
-      // Should have: Turn, TOOL(agent), AGENT(sub-1 container), LLM(nested inside AGENT)
-      expect(spanNames.some(n => n.includes("Turn 1"))).toBe(true);
-      expect(spanNames.some(n => n.includes("agent"))).toBe(true);
-      expect(spanNames.some(n => n.includes("Subagent: Custom"))).toBe(true);
-      expect(spanNames.some(n => n.includes("LLM"))).toBe(true);
+      // Should have: react step, execute_tool agent, invoke_agent Custom, chat qwen-max
+      expect(spanNames.some(n => n === "react step 1")).toBe(true);
+      expect(spanNames.some(n => n === "execute_tool agent")).toBe(true);
+      expect(spanNames.some(n => n === "invoke_agent Custom")).toBe(true);
+      expect(spanNames.some(n => n === "chat qwen-max")).toBe(true);
     });
 
     it("creates AGENT containers for parallel subagents without nesting LLM calls", () => {
@@ -364,23 +369,24 @@ describe("cli.js", () => {
       _replayEventsAsSpans(mockTracer, events, {}, 106);
 
       const spanNames = mockTracer.startSpan.mock.calls.map(c => c[0]);
-      // Both AGENT containers should be created (not zero-duration markers)
-      const agentSpans = spanNames.filter(n => n.includes("Subagent: Custom"));
+      // Both AGENT containers should be created
+      const agentSpans = spanNames.filter(n => n === "invoke_agent Custom");
       expect(agentSpans).toHaveLength(2);
-      // Both TOOL spans should exist (race condition fix ensures both are recorded)
-      const toolSpans = spanNames.filter(n => n.includes("agent"));
-      expect(toolSpans.length).toBeGreaterThanOrEqual(2);
+      // Both TOOL spans should exist
+      const toolSpans = spanNames.filter(n => n === "execute_tool agent");
+      expect(toolSpans).toHaveLength(2);
     });
   });
 
   describe("reconstructStateFromEvents", () => {
-    it("reconstructs metadata from events", () => {
+    it("reconstructs metadata from events, startTime from user_prompt_submit", () => {
       const events = [
+        { type: "notification", timestamp: 90, message: "Waiting" },
         { type: "user_prompt_submit", timestamp: 100, prompt: "hello world", model: "qwen-max" },
         { type: "pre_tool_use", timestamp: 101, tool_name: "Read" },
         { type: "pre_tool_use", timestamp: 102, tool_name: "Write" },
-        { type: "llm_call", timestamp: 103, model: "qwen-max", input_tokens: 500, output_tokens: 200 },
-        { type: "llm_call", timestamp: 104, model: "qwen-max", input_tokens: 300, output_tokens: 100 },
+        { type: "llm_call", timestamp: 103, model: "qwen-max", input_tokens: 500, output_tokens: 200, output_content: "first response" },
+        { type: "llm_call", timestamp: 104, model: "qwen-max", input_tokens: 300, output_tokens: 100, output_content: "final answer" },
       ];
 
       const state = _reconstructStateFromEvents("sess-1", events, 110);
@@ -389,10 +395,11 @@ describe("cli.js", () => {
       expect(state.stop_time).toBe(110);
       expect(state.prompt).toBe("hello world");
       expect(state.model).toBe("qwen-max");
+      expect(state.last_output).toBe("");
       expect(state.metrics.turns).toBe(1);
       expect(state.metrics.tools_used).toBe(2);
-      expect(state.metrics.input_tokens).toBe(800);
-      expect(state.metrics.output_tokens).toBe(300);
+      expect(state.metrics).not.toHaveProperty("input_tokens");
+      expect(state.metrics).not.toHaveProperty("output_tokens");
       expect(state.tools_used).toEqual(expect.arrayContaining(["Read", "Write"]));
       expect(state.events).toBe(events);
     });
@@ -402,6 +409,128 @@ describe("cli.js", () => {
       expect(state.prompt).toBe("");
       expect(state.model).toBe("unknown");
       expect(state.metrics.turns).toBe(0);
+    });
+  });
+
+  describe("extractOutputAndTokensFromEvents", () => {
+    it("extracts output and tokens from llm_call events", () => {
+      const events = [
+        { type: "user_prompt_submit", timestamp: 100 },
+        { type: "llm_call", timestamp: 103, model: "qwen-max", input_tokens: 500, output_tokens: 200, output_content: "first" },
+        { type: "llm_call", timestamp: 104, model: "qwen-max", input_tokens: 300, output_tokens: 100, output_content: "final" },
+      ];
+      const result = _extractOutputAndTokensFromEvents(events);
+      expect(result.lastOutput).toBe("final");
+      expect(result.inputTokens).toBe(800);
+      expect(result.outputTokens).toBe(300);
+      expect(result.model).toBe("qwen-max");
+    });
+
+    it("returns defaults when no llm_call events", () => {
+      const result = _extractOutputAndTokensFromEvents([{ type: "user_prompt_submit" }]);
+      expect(result.lastOutput).toBe("");
+      expect(result.inputTokens).toBe(0);
+      expect(result.outputTokens).toBe(0);
+      expect(result.model).toBe("unknown");
+    });
+  });
+
+  describe("mapStopReasonToFinishReason", () => {
+    it("maps stop/end_turn to stop", () => {
+      expect(_mapStopReasonToFinishReason("stop")).toBe("stop");
+      expect(_mapStopReasonToFinishReason("end_turn")).toBe("stop");
+    });
+    it("maps tool_calls/tool_use to tool_call", () => {
+      expect(_mapStopReasonToFinishReason("tool_calls")).toBe("tool_call");
+      expect(_mapStopReasonToFinishReason("tool_use")).toBe("tool_call");
+    });
+    it("maps length/max_tokens to length", () => {
+      expect(_mapStopReasonToFinishReason("length")).toBe("length");
+      expect(_mapStopReasonToFinishReason("max_tokens")).toBe("length");
+    });
+    it("returns stop for empty/null", () => {
+      expect(_mapStopReasonToFinishReason("")).toBe("stop");
+      expect(_mapStopReasonToFinishReason(null)).toBe("stop");
+    });
+  });
+
+  describe("transformToArmsInputMessages", () => {
+    it("converts OpenAI-format messages to ARMS schema", () => {
+      const input = [
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+        { role: "assistant", content: null, tool_calls: [{ id: "tc1", type: "function", function: { name: "read_file", arguments: '{"file_path":"/a"}' } }] },
+        { role: "tool", tool_call_id: "tc1", content: [{ type: "text", text: "file contents" }] },
+      ];
+      const result = _transformToArmsInputMessages(input);
+      expect(result).toHaveLength(3);
+      expect(result[0]).toEqual({ role: "user", parts: [{ type: "text", content: "hello" }] });
+      expect(result[1].parts[0].type).toBe("tool_call");
+      expect(result[1].parts[0].name).toBe("read_file");
+      expect(result[2].parts[0].type).toBe("tool_call_response");
+      expect(result[2].parts[0].id).toBe("tc1");
+    });
+
+    it("handles string content", () => {
+      const input = [{ role: "assistant", content: "Hello world" }];
+      const result = _transformToArmsInputMessages(input);
+      expect(result[0].parts[0]).toEqual({ type: "text", content: "Hello world" });
+    });
+  });
+
+  describe("transformToArmsOutputMessages", () => {
+    it("converts content_blocks to ARMS output format", () => {
+      const blocks = [
+        { type: "text", text: "The answer" },
+      ];
+      const result = _transformToArmsOutputMessages(blocks, "stop");
+      expect(result).toHaveLength(1);
+      expect(result[0].role).toBe("assistant");
+      expect(result[0].parts[0]).toEqual({ type: "text", content: "The answer" });
+      expect(result[0].finish_reason).toBe("stop");
+    });
+
+    it("converts tool_use blocks to tool_call parts", () => {
+      const blocks = [
+        { type: "tool_use", id: "tc1", name: "read_file", input: { file_path: "/a" } },
+      ];
+      const result = _transformToArmsOutputMessages(blocks, "tool_calls");
+      expect(result[0].parts[0].type).toBe("tool_call");
+      expect(result[0].parts[0].name).toBe("read_file");
+      expect(result[0].finish_reason).toBe("tool_call");
+    });
+  });
+
+  describe("transformToArmsSystemInstructions", () => {
+    it("converts string system prompt", () => {
+      const result = _transformToArmsSystemInstructions("You are helpful");
+      expect(result).toEqual([{ type: "text", content: "You are helpful" }]);
+    });
+
+    it("converts array of objects with text field", () => {
+      const result = _transformToArmsSystemInstructions([{ text: "Rule 1" }, { text: "Rule 2" }]);
+      expect(result).toHaveLength(2);
+      expect(result[0].content).toBe("Rule 1");
+    });
+
+    it("converts OpenAI message objects with nested content array", () => {
+      const result = _transformToArmsSystemInstructions([
+        { role: "system", content: [{ type: "text", text: "You are a bot" }] },
+      ]);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toEqual({ type: "text", content: "You are a bot" });
+    });
+
+    it("converts OpenAI message objects with string content", () => {
+      const result = _transformToArmsSystemInstructions([
+        { role: "system", content: "Be brief" },
+      ]);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toEqual({ type: "text", content: "Be brief" });
+    });
+
+    it("returns null for null/undefined", () => {
+      expect(_transformToArmsSystemInstructions(null)).toBeNull();
+      expect(_transformToArmsSystemInstructions(undefined)).toBeNull();
     });
   });
 
