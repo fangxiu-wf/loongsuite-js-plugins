@@ -6,7 +6,7 @@ Spans follow the [OpenTelemetry GenAI semantic conventions](https://opentelemetr
 
 | Span | gen_ai.span.kind | Description |
 |------|-----------------|-------------|
-| `enter_openclaw_system` | ENTRY | Request entry point |
+| `enter_ai_application_system` | ENTRY | Request entry point |
 | `invoke_agent` | AGENT | Agent invocation |
 | `chat` | LLM | LLM call |
 | `execute_tool` | TOOL | Tool execution |

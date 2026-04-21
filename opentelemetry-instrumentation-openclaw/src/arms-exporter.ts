@@ -272,6 +272,30 @@ export class ArmsExporter {
     }
   }
 
+  getTracerProvider(): BasicTracerProvider | null {
+    return this.provider;
+  }
+
+  getSpanKindAttrName(): string {
+    return SPAN_KIND_ATTR;
+  }
+
+  resolveParentContextFor(parentSpanId?: string): ReturnType<typeof context.active> {
+    return this.resolveParentContext(parentSpanId);
+  }
+
+  getOpenSpan(spanId: string): Span | undefined {
+    return this.openSpans.get(spanId);
+  }
+
+  registerOpenSpan(spanId: string, span: Span): void {
+    this.openSpans.set(spanId, span);
+  }
+
+  unregisterOpenSpan(spanId: string): void {
+    this.openSpans.delete(spanId);
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------

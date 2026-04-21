@@ -22,6 +22,44 @@ import type {
   SpanData,
 } from "./types.js";
 import { PLUGIN_VERSION } from "./version.js";
+import {
+  buildLlmInvocation,
+  buildToolInvocation,
+  buildEntryInvocation,
+  buildAgentInvocation,
+  buildStepInvocation,
+  type OpenclawContext,
+} from "./invocation-builder.js";
+import type { ReactStepInvocation, InvokeAgentInvocation, EntryInvocation } from "@loongsuite/opentelemetry-util-genai";
+import {
+  compatSerializeMessages,
+  compatFinishReasons,
+  compatSpanKindDialect,
+} from "./invocation-compat.js";
+import { ExtendedTelemetryHandler } from "@loongsuite/opentelemetry-util-genai";
+import {
+  GEN_AI_OPERATION_NAME,
+  GEN_AI_PROVIDER_NAME,
+  GEN_AI_REQUEST_MODEL,
+  GEN_AI_RESPONSE_MODEL,
+  GEN_AI_RESPONSE_FINISH_REASONS,
+  GEN_AI_USAGE_INPUT_TOKENS,
+  GEN_AI_USAGE_OUTPUT_TOKENS,
+  GEN_AI_USAGE_TOTAL_TOKENS,
+  GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+  GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+  GEN_AI_SESSION_ID,
+  GEN_AI_REACT_ROUND,
+  GEN_AI_REACT_FINISH_REASON,
+  GEN_AI_TOOL_NAME,
+  GEN_AI_TOOL_CALL_ID,
+  GEN_AI_TOOL_TYPE,
+  GEN_AI_TOOL_CALL_ARGUMENTS,
+  GEN_AI_TOOL_CALL_RESULT,
+  GEN_AI_INPUT_MESSAGES,
+  GEN_AI_OUTPUT_MESSAGES,
+  ERROR_TYPE,
+} from "@loongsuite/opentelemetry-util-genai";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -99,70 +137,6 @@ function mergeDefinedValues(
   return out;
 }
 
-function toSpecParts(content: unknown): Array<Record<string, unknown>> {
-  if (content === undefined || content === null) return [];
-  if (typeof content === "string") return [{ type: "text", content }];
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") return { type: "text", content: item };
-      if (typeof item === "object" && item !== null) {
-        const obj = item as Record<string, unknown>;
-        if (obj.type === "toolCall" || obj.type === "tool_call" || obj.type === "function_call") {
-          return {
-            type: "tool_call",
-            id: obj.id || obj.toolCallId || null,
-            name: obj.name || obj.toolName || "",
-            arguments: obj.arguments || obj.input || obj.params || null,
-          };
-        }
-        if (obj.type === "toolResult" || obj.type === "tool_result" || obj.type === "tool_call_response") {
-          const resp = obj.response ?? obj.result ?? obj.content ?? "";
-          return {
-            type: "tool_call_response",
-            id: obj.id || obj.toolCallId || null,
-            response: typeof resp === "string" ? resp : JSON.stringify(resp),
-          };
-        }
-        if (obj.type === "text") {
-          return { type: "text", content: String(obj.content ?? obj.text ?? "") };
-        }
-        if (obj.type === "thinking" || obj.type === "reasoning") {
-          return { type: "reasoning", content: String(obj.content ?? obj.thinking ?? "") };
-        }
-        if (obj.type) return obj;
-        return { type: "text", content: JSON.stringify(item) };
-      }
-      return { type: "text", content: String(item) };
-    });
-  }
-  return [{ type: "text", content: JSON.stringify(content) }];
-}
-
-function formatSystemInstructions(systemPrompt: string): string {
-  return truncateAttr(JSON.stringify([{ type: "text", content: systemPrompt }]));
-}
-
-const ROLE_MAP: Record<string, string> = {
-  toolResult: "tool",
-  tool_result: "tool",
-  function: "tool",
-};
-
-function formatInputMessages(
-  historyMessages: Array<{ role: string; content: unknown }>,
-  userPrompt?: string,
-): string {
-  const result: unknown[] = [];
-  for (const msg of historyMessages) {
-    const role = ROLE_MAP[msg.role] || msg.role;
-    result.push({ role, parts: toSpecParts(msg.content) });
-  }
-  if (userPrompt) {
-    result.push({ role: "user", parts: [{ type: "text", content: userPrompt }] });
-  }
-  return truncateAttr(JSON.stringify(result));
-}
-
 function formatOutputMessages(assistantTexts: string[], finishReason = "stop"): string {
   return truncateAttr(
     JSON.stringify(
@@ -173,26 +147,6 @@ function formatOutputMessages(assistantTexts: string[], finishReason = "stop"): 
       })),
     ),
   );
-}
-
-function formatAssistantOutputMessages(
-  assistantContent: unknown,
-  fallbackTexts: string[] = [],
-  finishReason = "stop",
-): string {
-  const parts = toSpecParts(assistantContent);
-  if (parts.length > 0) {
-    return truncateAttr(
-      JSON.stringify([
-        {
-          role: "assistant",
-          parts,
-          finish_reason: finishReason,
-        },
-      ]),
-    );
-  }
-  return formatOutputMessages(fallbackTexts, finishReason);
 }
 
 function normalizeChannelId(input: string | undefined): string {
@@ -358,28 +312,34 @@ interface TraceContext {
   userInput?: unknown;
   lastOutput?: unknown;
   rootSpanStartTime?: number;
+  entryInvocation?: EntryInvocation;
 
   llmProvider?: string;
   llmModel?: string;
   llmPendingStartTime?: number;
   llmPendingSpanId?: string;
-  llmPendingSystemInstructions?: string;
-  llmPendingInputMessages?: string;
-  llmLastInputMessages?: string;
+  llmPendingRawSystemPrompt?: string;
+  llmPendingRawInputHistory?: Array<{ role: string; content: unknown }>;
+  llmPendingRawUserPrompt?: string;
+  llmLastRawInputHistory?: Array<{ role: string; content: unknown }>;
+  llmLastRawUserPrompt?: string;
   llmLastAssistantContent?: unknown;
   llmPendingToolResultsForNextInput: Array<{ role: string; content: unknown }>;
   llmPendingToolCallIds: Set<string>;
   llmPendingToolCallCountFallback: number;
   llmSegmentCount: number;
   lastLlmUsage?: LlmUsage;
+  lastLlmEndTime?: number;
   stepSpanId?: string;
   stepStartTime?: number;
+  stepInvocation?: ReactStepInvocation;
   stepRoundCounter: number;
   stepCurrentRound?: number;
   stepAwaitingToolResults: boolean;
 
   agentStartTime?: number;
   agentSpanId?: string;
+  agentInvocation?: InvokeAgentInvocation;
   hasSeenLlmInput?: boolean;
   isClosing?: boolean;
 }
@@ -431,6 +391,19 @@ const armsTracePlugin: OpenClawPlugin = {
     };
 
     const exporter = new ArmsExporter(api, config);
+
+    let handler: ExtendedTelemetryHandler | null = null;
+    const ensureHandler = async (): Promise<ExtendedTelemetryHandler> => {
+      if (handler) return handler;
+      await exporter.ensureInitialized();
+      const tracerProvider = exporter.getTracerProvider();
+      handler = new ExtendedTelemetryHandler({
+        tracerProvider: tracerProvider || undefined,
+        instrumentationName: "opentelemetry-instrumentation-openclaw",
+        instrumentationVersion: PLUGIN_VERSION,
+      });
+      return handler;
+    };
 
     // -- Trace context management -------------------------------------------
 
@@ -539,8 +512,19 @@ const armsTracePlugin: OpenClawPlugin = {
         "openclaw.turn.id": realRunId,
       };
       exporter.patchOpenSpanAttributes(ctx.rootSpanId, rebindAttrs);
+      // Sync invocation.attributes for handler-managed spans to prevent
+      // applyXxxFinishAttributes from overwriting realRunId back to the
+      // temporary value when the span is stopped.
+      if (ctx.entryInvocation) {
+        if (!ctx.entryInvocation.attributes) ctx.entryInvocation.attributes = {};
+        Object.assign(ctx.entryInvocation.attributes, rebindAttrs);
+      }
       if (ctx.agentSpanId) {
         exporter.patchOpenSpanAttributes(ctx.agentSpanId, rebindAttrs);
+        if (ctx.agentInvocation) {
+          if (!ctx.agentInvocation.attributes) ctx.agentInvocation.attributes = {};
+          Object.assign(ctx.agentInvocation.attributes, rebindAttrs);
+        }
       }
       if (config.debug) {
         api.logger.info(
@@ -912,7 +896,7 @@ const armsTracePlugin: OpenClawPlugin = {
         ...attributes,
         "openclaw.version": openclawVersion,
         "openclaw.session.id": ctx.sessionId || channelId,
-        "gen_ai.session.id": ctx.sessionId || channelId,
+        [GEN_AI_SESSION_ID]: ctx.sessionId || channelId,
         "openclaw.run.id": ctx.runId,
         "openclaw.turn.id": ctx.turnId,
       },
@@ -928,6 +912,14 @@ const armsTracePlugin: OpenClawPlugin = {
 
     const resolveStepFirstParentSpanId = (ctx: TraceContext): string =>
       ctx.stepSpanId || ctx.agentSpanId || ctx.rootSpanId;
+
+    const makeOpenclawContext = (ctx: TraceContext, channelId: string): OpenclawContext => ({
+      openclawVersion,
+      sessionId: ctx.sessionId,
+      channelId,
+      runId: ctx.runId,
+      turnId: ctx.turnId,
+    });
 
     const exportPendingLlmSpan = async (
       ctx: TraceContext,
@@ -959,55 +951,61 @@ const armsTracePlugin: OpenClawPlugin = {
       const totalTokens =
         params.usage?.total ?? inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
 
-      const llmAttrs: Record<string, string | number | boolean> = {
-        "gen_ai.operation.name": "chat",
-        "gen_ai.provider.name": provider,
-        "gen_ai.request.model": model,
-        "gen_ai.response.model": model,
-        "gen_ai.usage.input_tokens": inputTokens,
-        "gen_ai.usage.output_tokens": outputTokens,
-        "gen_ai.usage.total_tokens": totalTokens,
-        "gen_ai.usage.cache_read.input_tokens": cacheReadTokens,
-        "gen_ai.usage.cache_creation.input_tokens": cacheCreationTokens,
+      const effectiveHistory = ctx.llmPendingRawInputHistory ?? ctx.llmLastRawInputHistory ?? [];
+      const effectiveUserPrompt = ctx.llmPendingRawUserPrompt ?? ctx.llmLastRawUserPrompt;
+
+      const octx = makeOpenclawContext(ctx, channelId);
+      const inv = buildLlmInvocation(octx, {
+        provider,
+        model,
+        systemPrompt: ctx.llmPendingRawSystemPrompt,
+        historyMessages: effectiveHistory,
+        prompt: effectiveUserPrompt,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheCreationTokens,
+        totalTokens,
+        outputContent: params.outputContent,
+        outputTexts: params.outputTexts,
+        stopReason,
+      });
+
+      const msgAttrs = compatSerializeMessages(inv);
+      for (const [key, value] of Object.entries(msgAttrs)) {
+        if (value && inv.attributes) inv.attributes[key] = value;
+      }
+
+      const finishAttrs: Record<string, unknown> = {
+        [GEN_AI_RESPONSE_FINISH_REASONS]: inv.finishReasons || [stopReason],
       };
+      compatFinishReasons(finishAttrs);
+      if (inv.attributes) {
+        inv.attributes[GEN_AI_RESPONSE_FINISH_REASONS] = finishAttrs[GEN_AI_RESPONSE_FINISH_REASONS];
+        inv.attributes[GEN_AI_USAGE_TOTAL_TOKENS] = totalTokens;
+        inv.attributes["openclaw.version"] = openclawVersion;
+        inv.attributes["openclaw.session.id"] = ctx.sessionId || channelId;
+        inv.attributes[GEN_AI_SESSION_ID] = ctx.sessionId || channelId;
+        inv.attributes["openclaw.run.id"] = ctx.runId;
+        inv.attributes["openclaw.turn.id"] = ctx.turnId;
+      }
 
-      if (ctx.llmPendingSystemInstructions) {
-        llmAttrs["gen_ai.system_instructions"] = ctx.llmPendingSystemInstructions;
-      }
-      const effectiveInputMessages = ctx.llmPendingInputMessages || ctx.llmLastInputMessages;
-      if (effectiveInputMessages) {
-        llmAttrs["gen_ai.input.messages"] = effectiveInputMessages;
-      }
-      if (params.outputContent !== undefined || params.outputTexts.length > 0) {
-        llmAttrs["gen_ai.output.messages"] = formatAssistantOutputMessages(
-          params.outputContent,
-          params.outputTexts,
-          stopReason,
-        );
-      }
-      llmAttrs["gen_ai.response.finish_reasons"] = JSON.stringify([stopReason]);
+      compatSpanKindDialect(inv, exporter.getSpanKindAttrName(), "LLM");
 
-      const span = createSpan(
-        ctx,
-        channelId,
-        `chat ${model}`,
-        "model",
-        startTime,
-        safeEndTime,
-        llmAttrs,
-        undefined,
-        undefined,
-        resolveStepFirstParentSpanId(ctx),
-      );
-      if (ctx.llmPendingSpanId) {
-        span.spanId = ctx.llmPendingSpanId;
-      }
-      await exporter.export(span);
+      const h = await ensureHandler();
+      const parentCtx = exporter.resolveParentContextFor(resolveStepFirstParentSpanId(ctx));
+      h.startLlm(inv, parentCtx, startTime);
+      h.stopLlm(inv, safeEndTime);
 
+      ctx.lastLlmEndTime =
+        ctx.lastLlmEndTime && ctx.lastLlmEndTime > safeEndTime
+          ? ctx.lastLlmEndTime
+          : safeEndTime;
       ctx.llmPendingStartTime = undefined;
       ctx.llmPendingSpanId = undefined;
-      ctx.llmPendingSystemInstructions = undefined;
-      ctx.llmPendingInputMessages = undefined;
+      ctx.llmPendingRawSystemPrompt = undefined;
+      ctx.llmPendingRawInputHistory = undefined;
+      ctx.llmPendingRawUserPrompt = undefined;
       ctx.llmSegmentCount += 1;
 
       if (config.debug) {
@@ -1083,26 +1081,18 @@ const armsTracePlugin: OpenClawPlugin = {
       if (ctx.rootSpanStartTime) return;
       const now = Date.now();
       ctx.rootSpanStartTime = now;
-      const rootSpanData: SpanData = {
-        name: "enter_openclaw_system",
-        type: "entry",
-        startTime: now,
-        attributes: {
-          "gen_ai.operation.name": "enter",
-          "gen_ai.user.id": options.userId || "unknown",
-          "openclaw.session.id": ctx.sessionId || channelId,
-          "gen_ai.session.id": ctx.sessionId || channelId,
-          "openclaw.run.id": ctx.runId,
-          "openclaw.turn.id": ctx.turnId,
-          "openclaw.message.role": options.role || "unknown",
-          "openclaw.message.from": options.from || "unknown",
-          "openclaw.version": openclawVersion,
-        },
-        input: ctx.userInput,
-        traceId: ctx.traceId,
-        spanId: ctx.rootSpanId,
-      };
-      await exporter.startSpan(rootSpanData, ctx.rootSpanId);
+      const octx = makeOpenclawContext(ctx, channelId);
+      const entryInv = buildEntryInvocation(octx, options);
+      compatSpanKindDialect(entryInv, exporter.getSpanKindAttrName(), "ENTRY");
+
+      const h = await ensureHandler();
+      h.startEntry(entryInv, undefined, now);
+
+      if (entryInv.span) {
+        exporter.registerOpenSpan(ctx.rootSpanId, entryInv.span as import("@opentelemetry/api").Span);
+      }
+      ctx.entryInvocation = entryInv;
+
       if (config.debug) {
         api.logger.info(
           `[ArmsTrace] Started root span: traceId=${ctx.traceId}, spanId=${ctx.rootSpanId}`,
@@ -1122,26 +1112,18 @@ const armsTracePlugin: OpenClawPlugin = {
       ctx.agentStartTime = now;
       ctx.agentSpanId = generateId(16);
 
-      const spanData: SpanData = {
-        name: `invoke_agent ${agentId}`,
-        type: "agent",
-        startTime: now,
-        attributes: {
-          "gen_ai.operation.name": "invoke_agent",
-          "gen_ai.provider.name": "openclaw",
-          "gen_ai.agent.id": agentId,
-          "gen_ai.agent.name": agentId,
-          "openclaw.session.id": ctx.sessionId || channelId,
-          "gen_ai.session.id": ctx.sessionId || channelId,
-          "openclaw.run.id": ctx.runId,
-          "openclaw.turn.id": ctx.turnId,
-          "openclaw.version": openclawVersion,
-        },
-        traceId: ctx.traceId,
-        spanId: ctx.agentSpanId,
-        parentSpanId: ctx.rootSpanId,
-      };
-      await exporter.startSpan(spanData, ctx.agentSpanId);
+      const octx = makeOpenclawContext(ctx, channelId);
+      const agentInv = buildAgentInvocation(octx, agentId);
+      compatSpanKindDialect(agentInv, exporter.getSpanKindAttrName(), "AGENT");
+
+      const h = await ensureHandler();
+      const parentCtx = exporter.resolveParentContextFor(ctx.rootSpanId);
+      h.startInvokeAgent(agentInv, parentCtx, now);
+
+      if (agentInv.span) {
+        exporter.registerOpenSpan(ctx.agentSpanId, agentInv.span as import("@opentelemetry/api").Span);
+      }
+      ctx.agentInvocation = agentInv;
 
       if (config.debug) {
         api.logger.info(
@@ -1160,27 +1142,21 @@ const armsTracePlugin: OpenClawPlugin = {
       }
       const round = ctx.stepRoundCounter + 1;
       const spanId = generateId(16);
-      const stepAttrs: Record<string, string | number | boolean> = {
-        "gen_ai.operation.name": "react",
-        "gen_ai.react.round": round,
-        "openclaw.session.id": ctx.sessionId || channelId,
-        "gen_ai.session.id": ctx.sessionId || channelId,
-        "openclaw.run.id": ctx.runId,
-        "openclaw.turn.id": ctx.turnId,
-        "openclaw.version": openclawVersion,
-      };
-      const spanData: SpanData = {
-        name: "react step",
-        type: "step",
-        startTime,
-        attributes: stepAttrs,
-        traceId: ctx.traceId,
-        spanId,
-        parentSpanId: resolveAgentFirstParentSpanId(ctx),
-      };
-      await exporter.startSpan(spanData, spanId);
+      const octx = makeOpenclawContext(ctx, channelId);
+      const stepInv = buildStepInvocation(octx, round);
+      compatSpanKindDialect(stepInv, exporter.getSpanKindAttrName(), "STEP");
+
+      const h = await ensureHandler();
+      const parentCtx = exporter.resolveParentContextFor(resolveAgentFirstParentSpanId(ctx));
+      h.startReactStep(stepInv, parentCtx, startTime);
+
+      if (stepInv.span) {
+        exporter.registerOpenSpan(spanId, stepInv.span as import("@opentelemetry/api").Span);
+      }
+
       ctx.stepSpanId = spanId;
       ctx.stepStartTime = startTime;
+      ctx.stepInvocation = stepInv;
       ctx.stepRoundCounter = round;
       ctx.stepCurrentRound = round;
       ctx.stepAwaitingToolResults = false;
@@ -1195,22 +1171,40 @@ const armsTracePlugin: OpenClawPlugin = {
       ctx: TraceContext,
       endTime: number,
       finishReason: string,
-      channelId: string,
+      _channelId: string,
     ) => {
       if (!ctx.stepSpanId) {
         return;
       }
       const stepSpanId = ctx.stepSpanId;
+      const stepInv = ctx.stepInvocation;
       const stepRound = ctx.stepCurrentRound || ctx.stepRoundCounter || 1;
-      const stepAttrs: Record<string, string | number | boolean> = {
-        "gen_ai.react.round": stepRound,
-        "gen_ai.react.finish_reason": finishReason || "stop",
-        "openclaw.session.id": ctx.sessionId || channelId,
-        "gen_ai.session.id": ctx.sessionId || channelId,
-      };
-      exporter.endSpanById(stepSpanId, endTime, stepAttrs);
+      // Guarantee step.endTime >= last child LLM.endTime so parent-child
+      // timing constraints are preserved even when agent_end races with
+      // the final before_message_write.
+      const safeEndTime =
+        ctx.lastLlmEndTime && ctx.lastLlmEndTime > endTime
+          ? ctx.lastLlmEndTime
+          : endTime;
+
+      if (stepInv && handler) {
+        stepInv.finishReason = finishReason || "stop";
+        stepInv.round = stepRound;
+        handler.stopReactStep(stepInv, safeEndTime);
+      } else {
+        const stepAttrs: Record<string, string | number | boolean> = {
+          [GEN_AI_REACT_ROUND]: stepRound,
+          [GEN_AI_REACT_FINISH_REASON]: finishReason || "stop",
+          "openclaw.session.id": ctx.sessionId || _channelId,
+          [GEN_AI_SESSION_ID]: ctx.sessionId || _channelId,
+        };
+        exporter.endSpanById(stepSpanId, safeEndTime, stepAttrs);
+      }
+
+      exporter.unregisterOpenSpan(stepSpanId);
       ctx.stepSpanId = undefined;
       ctx.stepStartTime = undefined;
+      ctx.stepInvocation = undefined;
       ctx.stepCurrentRound = undefined;
       ctx.stepAwaitingToolResults = false;
       if (config.debug) {
@@ -1255,7 +1249,7 @@ const armsTracePlugin: OpenClawPlugin = {
           },
         );
         delete (span.attributes as Record<string, unknown>)["openclaw.session.id"];
-        delete (span.attributes as Record<string, unknown>)["gen_ai.session.id"];
+        delete (span.attributes as Record<string, unknown>)[GEN_AI_SESSION_ID];
         await exporter.export(span);
       });
     }
@@ -1282,7 +1276,7 @@ const armsTracePlugin: OpenClawPlugin = {
             now,
             { "event.type": "session_start" },
           );
-          delete (span.attributes as Record<string, unknown>)["gen_ai.session.id"];
+          delete (span.attributes as Record<string, unknown>)[GEN_AI_SESSION_ID];
           if (event.sessionId) {
             span.attributes["openclaw.session.id"] = event.sessionId;
           }
@@ -1322,7 +1316,7 @@ const armsTracePlugin: OpenClawPlugin = {
               totalTokens: ctx.lastLlmUsage?.total,
             },
           );
-          delete (span.attributes as Record<string, unknown>)["gen_ai.session.id"];
+          delete (span.attributes as Record<string, unknown>)[GEN_AI_SESSION_ID];
           if (event.sessionId) {
             span.attributes["openclaw.session.id"] = event.sessionId;
           }
@@ -1454,15 +1448,15 @@ const armsTracePlugin: OpenClawPlugin = {
           ctx.llmPendingToolCallIds.clear();
           ctx.llmPendingToolCallCountFallback = 0;
 
-          if (event.systemPrompt) {
-            ctx.llmPendingSystemInstructions = formatSystemInstructions(event.systemPrompt);
-          }
+          ctx.llmPendingRawSystemPrompt = event.systemPrompt || undefined;
 
           const historyMsgs = event.historyMessages?.length
             ? event.historyMessages.map((msg) => safeClone(msg))
             : [];
-          ctx.llmPendingInputMessages = formatInputMessages(historyMsgs, event.prompt);
-          ctx.llmLastInputMessages = ctx.llmPendingInputMessages;
+          ctx.llmPendingRawInputHistory = historyMsgs;
+          ctx.llmPendingRawUserPrompt = event.prompt;
+          ctx.llmLastRawInputHistory = historyMsgs;
+          ctx.llmLastRawUserPrompt = event.prompt;
 
           const pendingAssistant = pendingAssistantByTraceId.get(ctx.traceId);
           if (pendingAssistant) {
@@ -1671,40 +1665,30 @@ const armsTracePlugin: OpenClawPlugin = {
           } = pendingToolCall;
           const now = Date.now();
 
-          const toolAttrs: Record<string, string | number | boolean> = {
-            "gen_ai.operation.name": "execute_tool",
-            "gen_ai.tool.name": toolName,
-            "gen_ai.tool.call.id": toolCallId,
-            "gen_ai.tool.type": "function",
-            "tool.duration_ms": event.durationMs || now - toolStartTime,
-          };
-          if (toolInput !== undefined) {
-            toolAttrs["gen_ai.tool.call.arguments"] = truncateAttr(
-              typeof toolInput === "string" ? toolInput : JSON.stringify(toolInput),
-            );
-          }
-          if (event.error) {
-            toolAttrs["error.type"] = event.error;
-          } else if (event.result !== undefined) {
-            toolAttrs["gen_ai.tool.call.result"] = truncateAttr(
-              typeof event.result === "string" ? event.result : JSON.stringify(event.result),
-            );
+          const octx = makeOpenclawContext(traceContext, channelId);
+          const toolInv = buildToolInvocation(toolName, toolCallId, toolInput, octx);
+          compatSpanKindDialect(toolInv, exporter.getSpanKindAttrName(), "TOOL");
+
+          if (toolInv.attributes) {
+            toolInv.attributes["tool.duration_ms"] = event.durationMs || now - toolStartTime;
+            if (toolInput !== undefined) {
+              toolInv.attributes[GEN_AI_TOOL_CALL_ARGUMENTS] = truncateAttr(
+                typeof toolInput === "string" ? toolInput : JSON.stringify(toolInput),
+              );
+            }
+            if (event.error) {
+              toolInv.attributes[ERROR_TYPE] = event.error;
+            } else if (event.result !== undefined) {
+              toolInv.attributes[GEN_AI_TOOL_CALL_RESULT] = truncateAttr(
+                typeof event.result === "string" ? event.result : JSON.stringify(event.result),
+              );
+            }
           }
 
-          const span = createSpan(
-            traceContext,
-            channelId,
-            `execute_tool ${toolName}`,
-            "tool",
-            toolStartTime,
-            now,
-            toolAttrs,
-            undefined,
-            undefined,
-            resolveStepFirstParentSpanId(traceContext),
-          );
-          span.spanId = toolSpanId;
-          await exporter.export(span);
+          const h = await ensureHandler();
+          const parentCtx = exporter.resolveParentContextFor(resolveStepFirstParentSpanId(traceContext));
+          h.startExecuteTool(toolInv, parentCtx, toolStartTime);
+          h.stopExecuteTool(toolInv, now);
 
           const toolResultPayload =
             event.error
@@ -1750,12 +1734,12 @@ const armsTracePlugin: OpenClawPlugin = {
               traceContext.llmPendingStartTime = now;
               traceContext.llmPendingSpanId = generateId(16);
               await ensureStepSpan(traceContext, channelId, now);
-              traceContext.llmPendingSystemInstructions = undefined;
-              traceContext.llmPendingInputMessages =
-                nextInputHistory.length > 0
-                  ? formatInputMessages(nextInputHistory)
-                  : undefined;
-              traceContext.llmLastInputMessages = traceContext.llmPendingInputMessages;
+              traceContext.llmPendingRawSystemPrompt = undefined;
+              traceContext.llmPendingRawInputHistory =
+                nextInputHistory.length > 0 ? nextInputHistory : undefined;
+              traceContext.llmPendingRawUserPrompt = undefined;
+              traceContext.llmLastRawInputHistory = traceContext.llmPendingRawInputHistory;
+              traceContext.llmLastRawUserPrompt = undefined;
               traceContext.llmPendingToolResultsForNextInput = [];
               if (config.debug) {
                 api.logger.info(
@@ -1816,19 +1800,32 @@ const armsTracePlugin: OpenClawPlugin = {
             "agent_end",
           );
           await drainTraceTasks(ctx.traceId);
-          ctx.isClosing = true;
-          const now = Date.now();
-          if (ctx.stepSpanId) {
-            endStepSpan(
-              ctx,
-              now,
-              ctx.stepAwaitingToolResults ? "agent_end" : "stop",
-              channelId,
-            );
+
+          // If a final LLM segment is still in-flight (waiting for
+          // before_message_write), wait briefly for it to finish so that
+          // the Step span we are about to close does not end before its
+          // child LLM span. Capped at 5s to bound agent_end latency.
+          if (ctx.llmPendingStartTime) {
+            const waitDeadline = Date.now() + 5000;
+            while (ctx.llmPendingStartTime && Date.now() < waitDeadline) {
+              await new Promise<void>((r) => setTimeout(r, 50));
+            }
           }
 
-          // Collect agent span closing data (defer actual close to setTimeout)
+          ctx.isClosing = true;
+          const now = Date.now();
+          // Capture step-related state synchronously; defer the actual
+          // endStepSpan call into the setTimeout(100) callback so that
+          // any in-flight before_message_write for the final LLM can
+          // complete first and the Step span's endTime is >= its child
+          // LLM span's endTime.
+          const deferredStepFinishReason = ctx.stepAwaitingToolResults
+            ? "agent_end"
+            : "stop";
+          const hasPendingStep = !!ctx.stepSpanId;
+
           const pendingAgentSpanId = ctx.agentSpanId;
+          const pendingAgentInv = ctx.agentInvocation;
           const agentEndTime = now;
           let agentEndAttrs: Record<string, string | number | boolean> | undefined;
           if (pendingAgentSpanId) {
@@ -1838,32 +1835,24 @@ const armsTracePlugin: OpenClawPlugin = {
               "agent.duration_ms": event.durationMs || 0,
               "agent.message_count": agentMessageCount,
               "agent.tool_call_count": agentToolCallCount,
-              "gen_ai.usage.input_tokens": ctx.lastLlmUsage?.input || 0,
-              "gen_ai.usage.output_tokens": ctx.lastLlmUsage?.output || 0,
-              "gen_ai.usage.total_tokens": ctx.lastLlmUsage?.total || 0,
+              [GEN_AI_USAGE_INPUT_TOKENS]: ctx.lastLlmUsage?.input || 0,
+              [GEN_AI_USAGE_OUTPUT_TOKENS]: ctx.lastLlmUsage?.output || 0,
+              [GEN_AI_USAGE_TOTAL_TOKENS]: ctx.lastLlmUsage?.total || 0,
             };
             if (ctx.sessionId) {
               agentEndAttrs["openclaw.session.id"] = ctx.sessionId || channelId;
-              agentEndAttrs["gen_ai.session.id"] = ctx.sessionId || channelId;
+              agentEndAttrs[GEN_AI_SESSION_ID] = ctx.sessionId || channelId;
             }
             const agentInput = ctx.userInput;
             if (agentInput) {
-              agentEndAttrs["gen_ai.input.messages"] = truncateAttr(
+              agentEndAttrs[GEN_AI_INPUT_MESSAGES] = truncateAttr(
                 JSON.stringify([{ role: "user", parts: [{ type: "text", content: String(agentInput) }] }]),
               );
             }
             ctx.agentSpanId = undefined;
             ctx.agentStartTime = undefined;
+            ctx.agentInvocation = undefined;
           }
-          const agentUsageCost = pendingAgentSpanId && ctx.lastLlmUsage
-            ? {
-              usage: {
-                input: ctx.lastLlmUsage.input,
-                output: ctx.lastLlmUsage.output,
-                total: ctx.lastLlmUsage.total,
-              },
-            }
-            : undefined;
 
           const rootCtx = ctx;
 
@@ -1880,19 +1869,33 @@ const armsTracePlugin: OpenClawPlugin = {
               const finalOutput =
                 ctx.lastOutput || rootCtx.lastOutput;
 
-              // End agent span (deferred)
+              // Close the pending Step span here (deferred from agent_end),
+              // so that any late before_message_write for the final LLM
+              // has exported its span first. endStepSpan internally uses
+              // max(endTime, ctx.lastLlmEndTime) for monotonicity.
+              if (hasPendingStep && ctx.stepSpanId) {
+                endStepSpan(
+                  ctx,
+                  Date.now(),
+                  deferredStepFinishReason,
+                  channelId,
+                );
+              }
+
               if (pendingAgentSpanId && agentEndAttrs) {
                 if (finalOutput) {
-                  agentEndAttrs["gen_ai.output.messages"] = formatOutputMessages(
+                  agentEndAttrs[GEN_AI_OUTPUT_MESSAGES] = formatOutputMessages(
                     [typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput)],
                   );
                 }
-                exporter.endSpanById(
-                  pendingAgentSpanId,
-                  agentEndTime,
-                  agentEndAttrs,
-                  agentUsageCost,
-                );
+                if (pendingAgentInv && handler) {
+                  if (!pendingAgentInv.attributes) pendingAgentInv.attributes = {};
+                  Object.assign(pendingAgentInv.attributes, agentEndAttrs);
+                  handler.stopInvokeAgent(pendingAgentInv, agentEndTime);
+                } else {
+                  exporter.endSpanById(pendingAgentSpanId, agentEndTime, agentEndAttrs);
+                }
+                exporter.unregisterOpenSpan(pendingAgentSpanId);
                 if (config.debug) {
                   api.logger.info(
                     `[ArmsTrace] Ended agent span: spanId=${pendingAgentSpanId}, duration=${event.durationMs}ms`,
@@ -1900,7 +1903,6 @@ const armsTracePlugin: OpenClawPlugin = {
                 }
               }
 
-              // End root span
               if (rootSpanStartTime) {
                 const endTime = Date.now();
                 const rootEndAttrs: Record<string, string | number | boolean> = {
@@ -1908,25 +1910,33 @@ const armsTracePlugin: OpenClawPlugin = {
                 };
                 if (resolvedSessionId) {
                   rootEndAttrs["openclaw.session.id"] = resolvedSessionId;
-                  rootEndAttrs["gen_ai.session.id"] = resolvedSessionId;
+                  rootEndAttrs[GEN_AI_SESSION_ID] = resolvedSessionId;
                 }
                 if (userInput) {
-                  rootEndAttrs["gen_ai.input.messages"] = truncateAttr(
+                  rootEndAttrs[GEN_AI_INPUT_MESSAGES] = truncateAttr(
                     JSON.stringify([{ role: "user", parts: [{ type: "text", content: String(userInput) }] }]),
                   );
                 }
                 if (finalOutput) {
-                  rootEndAttrs["gen_ai.output.messages"] = formatOutputMessages(
+                  rootEndAttrs[GEN_AI_OUTPUT_MESSAGES] = formatOutputMessages(
                     [typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput)],
                   );
                 }
-                exporter.endSpanById(
-                  rootSpanId,
-                  endTime,
-                  rootEndAttrs,
-                  finalOutput,
-                  userInput,
-                );
+                const pendingEntryInv = rootCtx.entryInvocation;
+                if (pendingEntryInv && handler) {
+                  if (!pendingEntryInv.attributes) pendingEntryInv.attributes = {};
+                  Object.assign(pendingEntryInv.attributes, rootEndAttrs);
+                  handler.stopEntry(pendingEntryInv, endTime);
+                } else {
+                  exporter.endSpanById(
+                    rootSpanId,
+                    endTime,
+                    rootEndAttrs,
+                    finalOutput,
+                    userInput,
+                  );
+                }
+                exporter.unregisterOpenSpan(rootSpanId);
                 if (config.debug) {
                   api.logger.info(
                     `[ArmsTrace] Ended root span: spanId=${rootSpanId}, duration=${endTime - rootSpanStartTime}ms, traceId=${traceId}`,

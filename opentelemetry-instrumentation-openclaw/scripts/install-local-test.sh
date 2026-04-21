@@ -16,10 +16,11 @@ DIAG_PLUGIN_NAME="diagnostics-otel"
 DEFAULT_PLUGIN_FILE="./release/opentelemetry-instrumentation-openclaw.tar.gz"
 
 # ── Defaults (can be overridden by CLI args) ──
-ENDPOINT="https://your-otlp-endpoint/apm/trace/opentelemetry"
-LICENSE_KEY="your-license-key"
-ARMS_PROJECT="your-arms-project"
-CMS_WORKSPACE="your-cms-workspace"
+# todo 要改回去！！！
+ENDPOINT="https://proj-xtrace-ee483ec157740929c4cb92d4ff85f-cn-hongkong.cn-hongkong.log.aliyuncs.com/apm/trace/opentelemetry"
+LICENSE_KEY="hwx28v3j7p@672218fb660eec3"
+ARMS_PROJECT="proj-xtrace-ee483ec157740929c4cb92d4ff85f-cn-hongkong"
+CMS_WORKSPACE="default-cms-1819385687343877-cn-hongkong"
 SERVICE_NAME="openclaw-cms"
 PLUGIN_FILE="${DEFAULT_PLUGIN_FILE}"
 INSTALL_DIR=""
