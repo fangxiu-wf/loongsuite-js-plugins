@@ -37,6 +37,14 @@ import {
   compatSpanKindDialect,
 } from "./invocation-compat.js";
 import { ExtendedTelemetryHandler } from "@loongsuite/opentelemetry-util-genai";
+import { ROOT_CONTEXT, trace } from "@opentelemetry/api";
+import {
+  parseTraceparent,
+  getRemoteParentContext,
+  updatePropagationStore,
+  installPropagation,
+  uninstallPropagation,
+} from "./trace-propagation.js";
 import {
   GEN_AI_OPERATION_NAME,
   GEN_AI_PROVIDER_NAME,
@@ -388,9 +396,18 @@ const armsTracePlugin: OpenClawPlugin = {
       batchSize: (resolvedConfig.batchSize as number) || 10,
       flushIntervalMs: (resolvedConfig.flushIntervalMs as number) || 5000,
       enabledHooks: resolvedConfig.enabledHooks as string[] | undefined,
+      enableTracePropagation: (resolvedConfig.enableTracePropagation as boolean) || false,
+      propagationTargetUrls: resolvedConfig.propagationTargetUrls as string[] | undefined,
     };
 
     const exporter = new ArmsExporter(api, config);
+
+    if (config.enableTracePropagation) {
+      installPropagation({
+        targetUrls: config.propagationTargetUrls,
+        excludeUrl: config.endpoint,
+      });
+    }
 
     let handler: ExtendedTelemetryHandler | null = null;
     const ensureHandler = async (): Promise<ExtendedTelemetryHandler> => {
@@ -1086,10 +1103,24 @@ const armsTracePlugin: OpenClawPlugin = {
       compatSpanKindDialect(entryInv, exporter.getSpanKindAttrName(), "ENTRY");
 
       const h = await ensureHandler();
-      h.startEntry(entryInv, undefined, now);
+      const remoteParentCtx = config.enableTracePropagation
+        ? getRemoteParentContext()
+        : undefined;
+      h.startEntry(entryInv, remoteParentCtx, now);
 
       if (entryInv.span) {
         exporter.registerOpenSpan(ctx.rootSpanId, entryInv.span as import("@opentelemetry/api").Span);
+        if (config.enableTracePropagation) {
+          const actualTraceId = (entryInv.span as import("@opentelemetry/api").Span).spanContext().traceId;
+          if (actualTraceId !== ctx.traceId) {
+            const oldId = ctx.traceId;
+            ctx.traceId = actualTraceId;
+            const queued = traceTaskQueueByTraceId.get(oldId);
+            if (queued) { traceTaskQueueByTraceId.delete(oldId); traceTaskQueueByTraceId.set(actualTraceId, queued); }
+            const pendingAsst = pendingAssistantByTraceId.get(oldId);
+            if (pendingAsst) { pendingAssistantByTraceId.delete(oldId); pendingAssistantByTraceId.set(actualTraceId, pendingAsst); }
+          }
+        }
       }
       ctx.entryInvocation = entryInv;
 
@@ -1218,6 +1249,9 @@ const armsTracePlugin: OpenClawPlugin = {
 
     api.on("gateway_stop", async () => {
       clearInterval(contextSweepTimer);
+      if (config.enableTracePropagation) {
+        uninstallPropagation();
+      }
       const queuedTasks = Array.from(traceTaskQueueByTraceId.values());
       if (queuedTasks.length > 0) {
         await Promise.allSettled(queuedTasks);
@@ -1354,6 +1388,19 @@ const armsTracePlugin: OpenClawPlugin = {
             lastUserContextSetAt = Date.now();
             ctx.userInput = event.content;
 
+            // WebSocket path: traceparent may be carried in message payload metadata
+            if (config.enableTracePropagation) {
+              const tp = (event.metadata as Record<string, unknown> | undefined)?.traceparent as string | undefined;
+              if (tp) {
+                const remoteSpanCtx = parseTraceparent(tp);
+                if (remoteSpanCtx) {
+                  updatePropagationStore({
+                    remoteParentContext: trace.setSpanContext(ROOT_CONTEXT, remoteSpanCtx),
+                  });
+                }
+              }
+            }
+
             await ensureEntrySpan(ctx, channelId, {
               userId: event.from || ((event.metadata as { senderId?: string } | undefined)?.senderId),
               role,
@@ -1445,6 +1492,13 @@ const armsTracePlugin: OpenClawPlugin = {
             activeContextByAgentChannel.set(rawChannelId, ctx);
           }
           await ensureStepSpan(ctx, channelId, llmInputStartedAt);
+          // Expose the Step span context for outbound traceparent injection
+          if (config.enableTracePropagation && ctx.stepSpanId) {
+            const stepSpan = exporter.getOpenSpan(ctx.stepSpanId);
+            if (stepSpan) {
+              updatePropagationStore({ outboundSpanContext: stepSpan.spanContext() });
+            }
+          }
           ctx.llmPendingToolCallIds.clear();
           ctx.llmPendingToolCallCountFallback = 0;
 

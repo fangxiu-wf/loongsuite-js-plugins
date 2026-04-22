@@ -51,6 +51,8 @@ export interface ArmsTraceConfig {
   batchSize: number;
   flushIntervalMs: number;
   enabledHooks?: string[];
+  enableTracePropagation?: boolean;
+  propagationTargetUrls?: string[];
 }
 
 export type SpanType =
