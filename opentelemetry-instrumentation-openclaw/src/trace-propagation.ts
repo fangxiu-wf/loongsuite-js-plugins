@@ -188,9 +188,14 @@ export function makeRequestPatch(
     const store = propagationStore.getStore();
     const spanCtx = store?.outboundSpanContext;
     if (spanCtx && shouldInject(urlStr, targetUrls, excludeUrl)) {
-      const headers = (opts.headers as Record<string, string>) || {};
-      headers["traceparent"] = formatTraceparent(spanCtx);
-      opts.headers = headers;
+      const existingHeaders = (opts.headers as Record<string, string>) || {};
+      const patchedOpts = { ...opts, headers: { ...existingHeaders, traceparent: formatTraceparent(spanCtx) } };
+      // Update the argument reference so original() receives the patched copy
+      if (typeof urlOrOptions === "string" || urlOrOptions instanceof URL) {
+        optionsOrCb = patchedOpts;
+      } else {
+        urlOrOptions = patchedOpts;
+      }
     }
 
     return original.call(this, urlOrOptions, optionsOrCb, cb) as httpTypes.ClientRequest;
@@ -212,6 +217,73 @@ function patchHttpClient(targetUrls?: string[], excludeUrl?: string): void {
     targetUrls,
     excludeUrl,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Content-embedded OTel extraction (WebSocket path)
+// ---------------------------------------------------------------------------
+
+const MAX_CUSTOM_ATTR_COUNT = 20;
+const MAX_CUSTOM_ATTR_KEY_LEN = 128;
+const MAX_CUSTOM_ATTR_VALUE_LEN = 1024;
+const RESERVED_ATTR_PREFIXES = ["openclaw.", "gen_ai."];
+const OTEL_CONTENT_RE = /\n?<!--otel:(\{.*?\})-->$/s;
+
+export interface OtelContentPayload {
+  spanContext?: SpanContext;
+  customAttributes?: Record<string, string | number | boolean>;
+  cleanContent: string;
+}
+
+export function extractOtelFromContent(content: string): OtelContentPayload | null {
+  const m = OTEL_CONTENT_RE.exec(content);
+  if (!m) return null;
+
+  let parsed: { tp?: string; attr?: Record<string, unknown> };
+  try {
+    parsed = JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+
+  const result: OtelContentPayload = {
+    cleanContent: content.slice(0, m.index),
+  };
+
+  if (typeof parsed.tp === "string") {
+    const spanCtx = parseTraceparent(parsed.tp);
+    if (spanCtx) {
+      result.spanContext = spanCtx;
+    }
+  }
+
+  if (parsed.attr && typeof parsed.attr === "object" && !Array.isArray(parsed.attr)) {
+    const attrs: Record<string, string | number | boolean> = {};
+    let count = 0;
+    for (const [key, value] of Object.entries(parsed.attr)) {
+      if (count >= MAX_CUSTOM_ATTR_COUNT) break;
+      if (key.length > MAX_CUSTOM_ATTR_KEY_LEN) continue;
+      if (RESERVED_ATTR_PREFIXES.some((p) => key.startsWith(p))) continue;
+
+      if (typeof value === "string") {
+        attrs[key] = value.length > MAX_CUSTOM_ATTR_VALUE_LEN
+          ? value.slice(0, MAX_CUSTOM_ATTR_VALUE_LEN)
+          : value;
+        count++;
+      } else if (typeof value === "number" || typeof value === "boolean") {
+        attrs[key] = value;
+        count++;
+      }
+    }
+    if (count > 0) {
+      result.customAttributes = attrs;
+    }
+  }
+
+  if (!result.spanContext && !result.customAttributes) return null;
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------

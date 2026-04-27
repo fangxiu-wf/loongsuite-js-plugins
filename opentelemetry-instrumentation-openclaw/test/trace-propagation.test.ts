@@ -21,6 +21,7 @@ import {
   uninstallPropagation,
   shouldInject,
   makeRequestPatch,
+  extractOtelFromContent,
 } from "../src/trace-propagation.js";
 
 // ---------------------------------------------------------------------------
@@ -342,5 +343,99 @@ describe("outbound traceparent injection via makeRequestPatch", () => {
 
     const opts = calls[0]?.[1] as { headers?: Record<string, string> } | undefined;
     expect(opts?.headers?.["traceparent"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractOtelFromContent — WebSocket content-embedded extraction
+// ---------------------------------------------------------------------------
+
+describe("extractOtelFromContent", () => {
+  it("extracts traceparent only", () => {
+    const content = `你好\n<!--otel:{"tp":"${VALID_TRACEPARENT}"}-->`;
+    const result = extractOtelFromContent(content);
+    expect(result).not.toBeNull();
+    expect(result!.spanContext!.traceId).toBe(VALID_TRACE_ID);
+    expect(result!.spanContext!.spanId).toBe(VALID_SPAN_ID);
+    expect(result!.customAttributes).toBeUndefined();
+    expect(result!.cleanContent).toBe("你好");
+  });
+
+  it("extracts custom attributes only", () => {
+    const content = '查询订单\n<!--otel:{"attr":{"user.id":"U-123","count":42,"debug":true}}-->';
+    const result = extractOtelFromContent(content);
+    expect(result).not.toBeNull();
+    expect(result!.spanContext).toBeUndefined();
+    expect(result!.customAttributes).toEqual({
+      "user.id": "U-123",
+      "count": 42,
+      "debug": true,
+    });
+    expect(result!.cleanContent).toBe("查询订单");
+  });
+
+  it("extracts both traceparent and attributes", () => {
+    const content = `你好\n<!--otel:{"tp":"${VALID_TRACEPARENT}","attr":{"env":"prod"}}-->`;
+    const result = extractOtelFromContent(content);
+    expect(result!.spanContext!.traceId).toBe(VALID_TRACE_ID);
+    expect(result!.customAttributes).toEqual({ "env": "prod" });
+    expect(result!.cleanContent).toBe("你好");
+  });
+
+  it("returns null for message without otel payload", () => {
+    expect(extractOtelFromContent("普通消息")).toBeNull();
+  });
+
+  it("returns null for malformed JSON", () => {
+    expect(extractOtelFromContent("msg\n<!--otel:not-json-->")).toBeNull();
+  });
+
+  it("returns null for otel payload not at end of message", () => {
+    expect(extractOtelFromContent('<!--otel:{"tp":"00-abc"}-->\n后续文字')).toBeNull();
+  });
+
+  it("returns null when neither tp nor attr is valid", () => {
+    expect(extractOtelFromContent('msg\n<!--otel:{"tp":"invalid"}-->')).toBeNull();
+  });
+
+  it("ignores reserved attribute prefixes", () => {
+    const content = '消息\n<!--otel:{"attr":{"openclaw.version":"hacked","gen_ai.model":"bad","user.id":"ok"}}-->';
+    const result = extractOtelFromContent(content);
+    expect(result!.customAttributes).toEqual({ "user.id": "ok" });
+  });
+
+  it("enforces max attribute count of 20", () => {
+    const attrs: Record<string, string> = {};
+    for (let i = 0; i < 25; i++) attrs[`key${i}`] = `val${i}`;
+    const content = `消息\n<!--otel:${JSON.stringify({ attr: attrs })}-->`;
+    const result = extractOtelFromContent(content);
+    expect(Object.keys(result!.customAttributes!).length).toBe(20);
+  });
+
+  it("truncates attribute values longer than 1024 characters", () => {
+    const longVal = "x".repeat(2000);
+    const content = `消息\n<!--otel:{"attr":{"key":"${longVal}"}}-->`;
+    const result = extractOtelFromContent(content);
+    expect(result!.customAttributes!["key"]).toHaveLength(1024);
+  });
+
+  it("skips non-primitive attribute values", () => {
+    const content = '消息\n<!--otel:{"attr":{"obj":{"nested":1},"arr":[1,2],"ok":"yes"}}-->';
+    const result = extractOtelFromContent(content);
+    expect(result!.customAttributes).toEqual({ "ok": "yes" });
+  });
+
+  it("skips attribute keys longer than 128 characters", () => {
+    const longKey = "k".repeat(200);
+    const content = `消息\n<!--otel:{"attr":{"${longKey}":"val","short":"ok"}}-->`;
+    const result = extractOtelFromContent(content);
+    expect(result!.customAttributes).toEqual({ "short": "ok" });
+  });
+
+  it("handles message without leading newline before otel tag", () => {
+    const content = `msg<!--otel:{"tp":"${VALID_TRACEPARENT}"}-->`;
+    const result = extractOtelFromContent(content);
+    expect(result).not.toBeNull();
+    expect(result!.cleanContent).toBe("msg");
   });
 });
