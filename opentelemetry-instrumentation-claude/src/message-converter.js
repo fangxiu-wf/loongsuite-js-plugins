@@ -84,6 +84,12 @@ function convertAnthropicContentBlock(block) {
         id: block.tool_use_id || null,
         response: block.content ?? null,
       };
+    case "image": {
+      const src = block.source || {};
+      const mimeType = src.media_type || "image/unknown";
+      const data = src.data || "";
+      return { type: "blob", mime_type: mimeType, modality: "image", content: data };
+    }
     case "thinking":
       return { type: "reasoning", content: block.thinking || "" };
     default:
@@ -162,6 +168,14 @@ function convertOpenAIChatMessage(msg) {
           parts.push({ type: "text", content: block });
         } else if (block && block.type === "text") {
           parts.push({ type: "text", content: block.text || "" });
+        } else if (block && block.type === "image_url" && block.image_url) {
+          const url = typeof block.image_url === "string" ? block.image_url : block.image_url.url || "";
+          const dataMatch = url.match(/^data:([^;]+);base64,(.+)$/);
+          if (dataMatch) {
+            parts.push({ type: "blob", mime_type: dataMatch[1], modality: "image", content: dataMatch[2] });
+          } else {
+            parts.push({ type: "uri", mime_type: "image/unknown", modality: "image", uri: url });
+          }
         }
       }
     }
@@ -209,6 +223,14 @@ function convertOpenAIResponsesItem(item) {
       if (typeof c === "string") return { type: "text", content: c };
       if (c && c.type === "input_text") return { type: "text", content: c.text || "" };
       if (c && c.type === "text") return { type: "text", content: c.text || "" };
+      if (c && c.type === "input_image") {
+        const url = c.image_url || c.url || "";
+        const dataMatch = url.match(/^data:([^;]+);base64,(.+)$/);
+        if (dataMatch) {
+          return { type: "blob", mime_type: dataMatch[1], modality: "image", content: dataMatch[2] };
+        }
+        return { type: "uri", mime_type: "image/unknown", modality: "image", uri: url };
+      }
       return { type: c?.type || "unknown" };
     });
     return { role, parts };

@@ -142,6 +142,24 @@ describe("convertInputMessages — Anthropic", () => {
       parts: [{ type: "reasoning", content: "I need to reason..." }],
     }]);
   });
+
+  test("image content block converts to BlobPart", () => {
+    const messages = [{
+      role: "user",
+      content: [
+        { type: "text", text: "What is this?" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+      ],
+    }];
+    const result = convertInputMessages(messages, "anthropic");
+    expect(result).toEqual([{
+      role: "user",
+      parts: [
+        { type: "text", content: "What is this?" },
+        { type: "blob", mime_type: "image/png", modality: "image", content: "iVBORw0KGgo=" },
+      ],
+    }]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -189,6 +207,40 @@ describe("convertInputMessages — OpenAI Chat", () => {
       parts: [{ type: "tool_call_response", id: "call_1", response: '{"temp":72}' }],
     }]);
   });
+
+  test("image_url with base64 data converts to BlobPart", () => {
+    const messages = [{
+      role: "user",
+      content: [
+        { type: "text", text: "Describe this" },
+        { type: "image_url", image_url: { url: "data:image/jpeg;base64,/9j/4AAQ=" } },
+      ],
+    }];
+    const result = convertInputMessages(messages, "openai-chat");
+    expect(result).toEqual([{
+      role: "user",
+      parts: [
+        { type: "text", content: "Describe this" },
+        { type: "blob", mime_type: "image/jpeg", modality: "image", content: "/9j/4AAQ=" },
+      ],
+    }]);
+  });
+
+  test("image_url with URL converts to UriPart", () => {
+    const messages = [{
+      role: "user",
+      content: [
+        { type: "image_url", image_url: { url: "https://example.com/photo.png" } },
+      ],
+    }];
+    const result = convertInputMessages(messages, "openai-chat");
+    expect(result).toEqual([{
+      role: "user",
+      parts: [
+        { type: "uri", mime_type: "image/unknown", modality: "image", uri: "https://example.com/photo.png" },
+      ],
+    }]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -214,6 +266,38 @@ describe("convertInputMessages — OpenAI Responses", () => {
     expect(result).toEqual([{
       role: "tool",
       parts: [{ type: "tool_call_response", id: "fc_1", response: "result" }],
+    }]);
+  });
+
+  test("input_image with base64 data converts to BlobPart", () => {
+    const messages = [{
+      role: "user",
+      content: [
+        { type: "input_text", text: "What is this?" },
+        { type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgo=" },
+      ],
+    }];
+    const result = convertInputMessages(messages, "openai-responses");
+    expect(result).toEqual([{
+      role: "user",
+      parts: [
+        { type: "text", content: "What is this?" },
+        { type: "blob", mime_type: "image/png", modality: "image", content: "iVBORw0KGgo=" },
+      ],
+    }]);
+  });
+
+  test("input_image with URL converts to UriPart", () => {
+    const messages = [{
+      role: "user",
+      content: [{ type: "input_image", url: "https://example.com/img.jpg" }],
+    }];
+    const result = convertInputMessages(messages, "openai-responses");
+    expect(result).toEqual([{
+      role: "user",
+      parts: [
+        { type: "uri", mime_type: "image/unknown", modality: "image", uri: "https://example.com/img.jpg" },
+      ],
     }]);
   });
 });
