@@ -158,10 +158,25 @@ describe("shouldLogFullMessages", () => {
 // ---------------------------------------------------------------------------
 describe("isLogEnabled", () => {
   const origEnv = process.env.OTEL_CLAUDE_LOG_ENABLED;
+  const config = require("../src/config");
+  let origReadFileSync;
+
+  beforeEach(() => {
+    config.resetConfigCache();
+    origReadFileSync = fs.readFileSync;
+    fs.readFileSync = function (p, ...args) {
+      if (typeof p === "string" && p.includes("otel-config.json")) {
+        throw new Error("ENOENT");
+      }
+      return origReadFileSync.call(this, p, ...args);
+    };
+  });
 
   afterEach(() => {
+    fs.readFileSync = origReadFileSync;
     if (origEnv === undefined) delete process.env.OTEL_CLAUDE_LOG_ENABLED;
     else process.env.OTEL_CLAUDE_LOG_ENABLED = origEnv;
+    config.resetConfigCache();
   });
 
   test("returns true when OTEL_CLAUDE_LOG_ENABLED=1", () => {

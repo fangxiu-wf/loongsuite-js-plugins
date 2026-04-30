@@ -29,6 +29,9 @@ function getLogFilePath() {
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
+  if (config.getLogFilenameFormat() === "hook") {
+    return path.join(dir, `claude-code-${y}-${m}-${d}.jsonl`);
+  }
   return path.join(dir, `claude-code.jsonl.${y}${m}${d}`);
 }
 

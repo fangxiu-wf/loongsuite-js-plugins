@@ -25,7 +25,7 @@ set -euo pipefail
 # ============================================================
 # Defaults
 # ============================================================
-DEFAULT_TARBALL_URL="https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/agenttrack/otel-claude-hook.tar.gz"
+DEFAULT_TARBALL_URL="https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-claude/otel-claude-hook.tar.gz"
 TARBALL_URL="${OTEL_CLAUDE_TARBALL_URL:-$DEFAULT_TARBALL_URL}"
 PLUGIN_NAME="otel-claude-hook"
 

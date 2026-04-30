@@ -18,6 +18,7 @@ Trace 数据完全遵循 [ARMS GenAI 语义规范](../arms/semantic-conventions/
 - **自动 alias 注入**：安装后 `claude` 命令自动携带 `NODE_OPTIONS=--require intercept.js`，无需手动配置
 - **配置文件支持**：可通过 `~/.claude/otel-config.json` 配置所有 OTLP 参数，优先于环境变量，避免与本地其他 OTel 工具冲突
 - **JSONL 日志采集**：可选的本地日志功能，支持 chain hash 增量校验和每日文件轮转，与 trace 数据关联
+- **纯日志模式（Log-only）**：支持仅输出 JSONL 日志而不上报 OTel Trace，适用于与 ai-agent-collector 等第三方采集工具集成
 - **一键安装**：`npm install -g` 后 postinstall 自动完成全部配置，或 `bash scripts/install.sh` 源码安装
 
 ---
@@ -34,7 +35,7 @@ Trace 数据完全遵循 [ARMS GenAI 语义规范](../arms/semantic-conventions/
 ## 快速安装（一行命令）
 
 ```bash
-curl -fsSL https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/agenttrack/remote-install.sh | bash -s -- \
+curl -fsSL https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-claude/remote-install.sh | bash -s -- \
   --endpoint "https://your-otlp-endpoint:4318" \
   --service-name "my-claude-agent"
 ```
@@ -59,7 +60,7 @@ source ~/.bashrc   # 或 source ~/.zshrc
 **本地调试模式（无需 OTLP 后端）：**
 
 ```bash
-curl -fsSL https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/agenttrack/remote-install.sh | bash --debug
+curl -fsSL https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-claude/remote-install.sh | bash --debug
 ```
 
 ---
@@ -127,6 +128,7 @@ bash scripts/install.sh
 | `semconv_dialect` | `LOONGSUITE_SEMCONV_DIALECT_NAME` | 语义规范方言 | 自动检测 |
 | `log_enabled` | `OTEL_CLAUDE_LOG_ENABLED` | 启用 JSONL 日志采集 | `false` |
 | `log_dir` | `OTEL_CLAUDE_LOG_DIR` | JSONL 日志目录 | `~/.loongcollector/data/` |
+| `log_filename_format` | `OTEL_CLAUDE_LOG_FILENAME_FORMAT` | 日志文件名格式：`default` 或 `hook` | `default` |
 
 ### 方式二：环境变量
 
@@ -176,6 +178,34 @@ export CLAUDE_TELEMETRY_DEBUG=1
   "debug": true
 }
 ```
+
+### 纯日志模式（Log-only）
+
+当只需要本地 JSONL 日志采集而不上报 OTel Trace 时，可以启用纯日志模式。适用于与 ai-agent-collector 集成等场景。
+
+在 `~/.claude/otel-config.json` 中：
+
+```json
+{
+  "log_enabled": true,
+  "log_dir": "~/.ai-agent-collector/logs/claude-code"
+}
+```
+
+或通过环境变量：
+
+```bash
+export OTEL_CLAUDE_LOG_ENABLED=1
+export OTEL_CLAUDE_LOG_DIR="~/.ai-agent-collector/logs/claude-code"
+```
+
+**注意**：纯日志模式下无需配置 `otlp_endpoint` 或 `debug`。插件会跳过 OTel Trace 导出，仅将每轮对话的详细记录写入本地 JSONL 文件。
+
+日志文件格式：
+- 默认路径：`<log_dir>/claude-code.jsonl.YYYYMMDD`
+- 可通过 `log_filename_format: "hook"` 切换为 `<log_dir>/claude-code-YYYY-MM-DD.jsonl`（兼容 ai-agent-collector 的 BaseHookInput）
+- 每行一个 JSON 对象，包含 `gen_ai.role`（user/assistant/tool）、`gen_ai.session_id`、token 用量等字段
+- 按天自动轮转
 
 ---
 

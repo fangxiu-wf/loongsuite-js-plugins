@@ -76,6 +76,10 @@ function getLogDir() {
   return getConfig("log_dir", "OTEL_CLAUDE_LOG_DIR", "");
 }
 
+function getLogFilenameFormat() {
+  return getConfig("log_filename_format", "OTEL_CLAUDE_LOG_FILENAME_FORMAT", "default");
+}
+
 module.exports = {
   CONFIG_PATH,
   loadConfigFile,
@@ -89,4 +93,5 @@ module.exports = {
   getSemconvDialect,
   isLogEnabled,
   getLogDir,
+  getLogFilenameFormat,
 };

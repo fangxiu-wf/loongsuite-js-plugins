@@ -845,7 +845,12 @@ function generateTurnLogRecords(turn, turnIndex, sessionId, model, prevHash, tra
 // ---------------------------------------------------------------------------
 
 async function exportSessionTrace(state, stopReason = "end_turn") {
-  const provider = configureTelemetry();
+  const logOnly = isLogEnabled() && !config.getEndpoint() && !config.isDebug();
+
+  let provider = null;
+  if (!logOnly) {
+    provider = configureTelemetry();
+  }
 
   if (!state || typeof state !== "object") {
     throw new Error("exportSessionTrace: invalid state object");
@@ -854,9 +859,6 @@ async function exportSessionTrace(state, stopReason = "end_turn") {
   const sessionId = state.session_id || "unknown";
   const startTime = typeof state.start_time === "number" ? state.start_time : Date.now() / 1000;
   const stopTime = typeof state.stop_time === "number" ? state.stop_time : Date.now() / 1000;
-
-  const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
-  const tracer = trace.getTracer("opentelemetry-instrumentation-claude");
 
   // Merge proxy events from intercept.js
   let allEvents = Array.isArray(state.events) ? [...state.events] : [];
@@ -879,70 +881,75 @@ async function exportSessionTrace(state, stopReason = "end_turn") {
   // Set endTime for last turn
   turns[turns.length - 1].endTime = stopTime;
 
-  // Export each turn as an independent trace
+  // Export each turn as an independent trace (skip in log-only mode)
   const entryInvs = [];
-  for (let i = 0; i < turns.length; i++) {
-    const turn = turns[i];
-    const isLast = i === turns.length - 1;
-    const turnStopReason = isLast ? stopReason : "end_turn";
+  if (!logOnly) {
+    const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
+    const tracer = trace.getTracer("opentelemetry-instrumentation-claude");
 
-    // Aggregate per-turn tokens from llm_call events
-    let turnInputTokens = 0, turnOutputTokens = 0;
-    let turnCacheRead = 0, turnCacheCreate = 0;
-    let turnModel = state.model || "unknown";
-    const llmEvents = turn.events.filter(e => e.type === "llm_call");
-    for (const lev of llmEvents) {
-      turnInputTokens += lev.input_tokens || 0;
-      turnOutputTokens += lev.output_tokens || 0;
-      turnCacheRead += lev.cache_read_input_tokens || 0;
-      turnCacheCreate += lev.cache_creation_input_tokens || 0;
-      if (lev.model) turnModel = lev.model;
+    for (let i = 0; i < turns.length; i++) {
+      const turn = turns[i];
+      const isLast = i === turns.length - 1;
+      const turnStopReason = isLast ? stopReason : "end_turn";
+
+      // Aggregate per-turn tokens from llm_call events
+      let turnInputTokens = 0, turnOutputTokens = 0;
+      let turnCacheRead = 0, turnCacheCreate = 0;
+      let turnModel = state.model || "unknown";
+      const llmEvents = turn.events.filter(e => e.type === "llm_call");
+      for (const lev of llmEvents) {
+        turnInputTokens += lev.input_tokens || 0;
+        turnOutputTokens += lev.output_tokens || 0;
+        turnCacheRead += lev.cache_read_input_tokens || 0;
+        turnCacheCreate += lev.cache_creation_input_tokens || 0;
+        if (lev.model) turnModel = lev.model;
+      }
+
+      // Determine turn output (last llm_call's output_content)
+      const lastLlm = llmEvents.length > 0 ? llmEvents[llmEvents.length - 1] : null;
+      const turnOutputMessages = lastLlm
+        ? convertOutputMessages(lastLlm.output_content, lastLlm.stop_reason)
+        : [];
+
+      // ENTRY span — no parent → new traceId
+      const entryInv = createEntryInvocation({
+        sessionId,
+        inputMessages: turn.prompt
+          ? [{ role: "user", parts: [{ type: "text", content: turn.prompt }] }]
+          : [],
+        outputMessages: turnOutputMessages,
+        attributes: sessionAttrs(sessionId, "ENTRY"),
+      });
+      handler.startEntry(entryInv, undefined, hrTime(turn.startTime));
+      entryInvs.push(entryInv);
+
+      // AGENT span
+      const agentInv = createInvokeAgentInvocation("anthropic", {
+        agentName: "claude-code",
+        agentId: sessionId,
+        conversationId: sessionId,
+        requestModel: turnModel,
+        responseModelName: turnModel,
+        inputTokens: turnInputTokens,
+        outputTokens: turnOutputTokens,
+        usageCacheReadInputTokens: turnCacheRead,
+        usageCacheCreationInputTokens: turnCacheCreate,
+        finishReasons: [turnStopReason],
+        inputMessages: turn.prompt
+          ? [{ role: "user", parts: [{ type: "text", content: turn.prompt }] }]
+          : [],
+        outputMessages: turnOutputMessages,
+        attributes: sessionAttrs(sessionId, "AGENT"),
+      });
+      handler.startInvokeAgent(agentInv, entryInv.contextToken, hrTime(turn.startTime));
+
+      // Replay this turn's events as child spans
+      replayEventsAsSpans(handler, tracer, turn.events, agentInv.contextToken, turn.endTime, sessionId);
+
+      // Close spans
+      handler.stopInvokeAgent(agentInv, hrTime(turn.endTime));
+      handler.stopEntry(entryInv, hrTime(turn.endTime));
     }
-
-    // Determine turn output (last llm_call's output_content)
-    const lastLlm = llmEvents.length > 0 ? llmEvents[llmEvents.length - 1] : null;
-    const turnOutputMessages = lastLlm
-      ? convertOutputMessages(lastLlm.output_content, lastLlm.stop_reason)
-      : [];
-
-    // ENTRY span — no parent → new traceId
-    const entryInv = createEntryInvocation({
-      sessionId,
-      inputMessages: turn.prompt
-        ? [{ role: "user", parts: [{ type: "text", content: turn.prompt }] }]
-        : [],
-      outputMessages: turnOutputMessages,
-      attributes: sessionAttrs(sessionId, "ENTRY"),
-    });
-    handler.startEntry(entryInv, undefined, hrTime(turn.startTime));
-    entryInvs.push(entryInv);
-
-    // AGENT span
-    const agentInv = createInvokeAgentInvocation("anthropic", {
-      agentName: "claude-code",
-      agentId: sessionId,
-      conversationId: sessionId,
-      requestModel: turnModel,
-      responseModelName: turnModel,
-      inputTokens: turnInputTokens,
-      outputTokens: turnOutputTokens,
-      usageCacheReadInputTokens: turnCacheRead,
-      usageCacheCreationInputTokens: turnCacheCreate,
-      finishReasons: [turnStopReason],
-      inputMessages: turn.prompt
-        ? [{ role: "user", parts: [{ type: "text", content: turn.prompt }] }]
-        : [],
-      outputMessages: turnOutputMessages,
-      attributes: sessionAttrs(sessionId, "AGENT"),
-    });
-    handler.startInvokeAgent(agentInv, entryInv.contextToken, hrTime(turn.startTime));
-
-    // Replay this turn's events as child spans
-    replayEventsAsSpans(handler, tracer, turn.events, agentInv.contextToken, turn.endTime, sessionId);
-
-    // Close spans
-    handler.stopInvokeAgent(agentInv, hrTime(turn.endTime));
-    handler.stopEntry(entryInv, hrTime(turn.endTime));
   }
 
   // Write JSONL logs (independent of trace export — failure doesn't block traces)
@@ -954,10 +961,12 @@ async function exportSessionTrace(state, stopReason = "end_turn") {
       for (let i = 0; i < turns.length; i++) {
         const turn = turns[i];
         let turnTraceId = null;
-        try {
-          const entrySpan = trace.getSpan(entryInvs[i].contextToken);
-          if (entrySpan) turnTraceId = entrySpan.spanContext().traceId;
-        } catch {}
+        if (!logOnly && entryInvs[i]) {
+          try {
+            const entrySpan = trace.getSpan(entryInvs[i].contextToken);
+            if (entrySpan) turnTraceId = entrySpan.spanContext().traceId;
+          } catch {}
+        }
 
         const { records, hash } = generateTurnLogRecords(
           turn, i, sessionId, state.model || "unknown", logHash, turnTraceId
@@ -972,14 +981,16 @@ async function exportSessionTrace(state, stopReason = "end_turn") {
     }
   }
 
-  await shutdownTelemetry();
+  if (!logOnly) {
+    await shutdownTelemetry();
+  }
 
   const totalIn = turns.reduce((s, t) =>
     s + t.events.filter(e => e.type === "llm_call").reduce((a, e) => a + (e.input_tokens || 0), 0), 0);
   const totalOut = turns.reduce((s, t) =>
     s + t.events.filter(e => e.type === "llm_call").reduce((a, e) => a + (e.output_tokens || 0), 0), 0);
   console.error(
-    `✅ Session traced | ${turns.length} turn(s) | ` +
+    `✅ Session ${logOnly ? "logged" : "traced"} | ${turns.length} turn(s) | ` +
     `${totalIn} in, ${totalOut} out | ` +
     `${(stopTime - startTime).toFixed(1)}s`
   );

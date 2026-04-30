@@ -480,6 +480,24 @@ describe("cmdSubagentStop", () => {
 
 // ─── cmdCheckEnv ──────────────────────────────────────────────────────────
 describe("cmdCheckEnv", () => {
+  const config = require("../src/config");
+  const origReadFileSync = fs.readFileSync;
+
+  beforeEach(() => {
+    config.resetConfigCache();
+    fs.readFileSync = function (p, ...args) {
+      if (typeof p === "string" && p.includes("otel-config.json")) {
+        throw new Error("ENOENT");
+      }
+      return origReadFileSync.call(this, p, ...args);
+    };
+  });
+
+  afterEach(() => {
+    fs.readFileSync = origReadFileSync;
+    config.resetConfigCache();
+  });
+
   test("exits 1 when no backend configured", () => {
     delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     delete process.env.CLAUDE_TELEMETRY_DEBUG;

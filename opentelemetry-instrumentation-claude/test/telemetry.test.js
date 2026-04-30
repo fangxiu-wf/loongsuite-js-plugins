@@ -2,14 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 "use strict";
 
+const fs = require("fs");
+
 describe("telemetry", () => {
   let telemetry;
+  const origReadFileSync = fs.readFileSync;
 
   beforeEach(() => {
     jest.resetModules();
+    fs.readFileSync = function (p, ...args) {
+      if (typeof p === "string" && p.includes("otel-config.json")) {
+        throw new Error("ENOENT");
+      }
+      return origReadFileSync.call(this, p, ...args);
+    };
   });
 
   afterEach(async () => {
+    fs.readFileSync = origReadFileSync;
     if (telemetry) {
       try { await telemetry.shutdownTelemetry(); } catch {}
       telemetry = null;
