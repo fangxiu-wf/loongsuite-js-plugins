@@ -11,6 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 
 const { trace, context } = require("@opentelemetry/api");
 const { loadState, saveState, clearState, readAndDeleteChildState, STATE_DIR } = require("./state");
@@ -721,15 +722,26 @@ function generateTurnLogRecords(turn, turnIndex, sessionId, model, prevHash, tra
   let currentStepId = null;
   let runningHash = prevHash;
 
+  let userId;
+  try { userId = os.userInfo().username; } catch { userId = ""; }
+
+  const base = {
+    trace_id: traceId || null,
+    "session.id": sessionId,
+    "turn.id": turnId,
+    "user.id": userId,
+    "agent.type": "claude-code",
+    "agent.name": "claude-code",
+  };
+
   if (turn.prompt) {
     records.push({
-      timestamp_ns: Math.round(turn.startTime * 1e9),
-      trace_id: traceId || null,
-      "gen_ai.session_id": sessionId,
-      "gen_ai.turn_id": turnId,
-      "gen_ai.agent_name": "claude-code",
-      "gen_ai.role": "user",
-      "gen_ai.input_messages_delta": JSON.stringify(
+      time_unix_nano: Math.round(turn.startTime * 1e9),
+      "event.id": crypto.randomUUID(),
+      "event.name": "llm.request",
+      ...base,
+      "message.role": "user",
+      "input.messages_delta": JSON.stringify(
         [{ role: "user", parts: [{ type: "text", content: turn.prompt }] }]
       ),
     });
@@ -757,41 +769,58 @@ function generateTurnLogRecords(turn, turnIndex, sessionId, model, prevHash, tra
       const delta = inputMsgs;
       const logFull = shouldLogFullMessages(runningHash, delta, currentFullHash);
 
-      const record = {
-        timestamp_ns: Math.round((ev.request_start_time || evTs) * 1e9),
-        trace_id: traceId || null,
-        "gen_ai.session_id": sessionId,
-        "gen_ai.turn_id": turnId,
-        "gen_ai.step_id": currentStepId,
-        "gen_ai.response_id": responseId,
-        "gen_ai.agent_id": sessionId,
-        "gen_ai.agent_name": "claude-code",
-        "gen_ai.provider_name": "anthropic",
-        "gen_ai.request_model": ev.model || model,
-        "gen_ai.response_model": ev.model || model,
-        "gen_ai.response_finish_reasons": ev.stop_reason || "stop",
-        "gen_ai.input_tokens": ev.input_tokens || 0,
-        "gen_ai.output_tokens": ev.output_tokens || 0,
-        "gen_ai.cache_write_tokens": ev.cache_creation_input_tokens || 0,
-        "gen_ai.cache_read_tokens": ev.cache_read_input_tokens || 0,
-        "gen_ai.role": "assistant",
-        "gen_ai.input_messages_hash": currentFullHash,
-        "gen_ai.input_messages_delta": JSON.stringify(delta),
-        "gen_ai.output_messages": JSON.stringify(
+      const requestRecord = {
+        time_unix_nano: Math.round((ev.request_start_time || evTs) * 1e9),
+        "event.id": crypto.randomUUID(),
+        "event.name": "llm.request",
+        ...base,
+        "step.id": currentStepId,
+        "response.id": responseId,
+        "agent.id": sessionId,
+        "message.role": "assistant",
+        "provider.name": "anthropic",
+        "request.model": ev.model || model,
+        "input.messages_hash": currentFullHash,
+        "input.messages_delta": JSON.stringify(delta),
+      };
+
+      if (logFull) {
+        requestRecord["input.messages"] = JSON.stringify(inputMsgs);
+      }
+
+      records.push(requestRecord);
+
+      const inputTokens = ev.input_tokens || 0;
+      const outputTokens = ev.output_tokens || 0;
+      const responseRecord = {
+        time_unix_nano: Math.round(evTs * 1e9),
+        "event.id": crypto.randomUUID(),
+        "event.name": "llm.response",
+        ...base,
+        "step.id": currentStepId,
+        "response.id": responseId,
+        "message.role": "assistant",
+        "provider.name": "anthropic",
+        "request.model": ev.model || model,
+        "response.model": ev.model || model,
+        "response.finish_reasons": ev.stop_reason || "stop",
+        "usage.input_tokens": inputTokens,
+        "usage.output_tokens": outputTokens,
+        "usage.cache_write_tokens": ev.cache_creation_input_tokens || 0,
+        "usage.cache_read_tokens": ev.cache_read_input_tokens || 0,
+        "usage.total_tokens": inputTokens + outputTokens,
+        "output.messages": JSON.stringify(
           convertOutputMessages(ev.output_content, ev.stop_reason)
         ),
       };
 
-      if (logFull) {
-        record["gen_ai.input_messages"] = JSON.stringify(inputMsgs);
-      }
-
       if (ev.is_error) {
-        record["gen_ai.error_type"] = "LLMError";
-        record["gen_ai.error_message"] = ev.error_message || "unknown error";
+        responseRecord["is_error"] = true;
+        responseRecord["error.type"] = "LLMError";
+        responseRecord["error.message"] = ev.error_message || "unknown error";
       }
 
-      records.push(record);
+      records.push(responseRecord);
       runningHash = currentFullHash;
 
     } else if (ev.type === "post_tool_use") {
@@ -803,17 +832,43 @@ function generateTurnLogRecords(turn, turnIndex, sessionId, model, prevHash, tra
       const effectiveInput = preEv.tool_input || {};
 
       records.push({
-        timestamp_ns: Math.round(evTs * 1e9),
-        trace_id: traceId || null,
-        "gen_ai.session_id": sessionId,
-        "gen_ai.turn_id": turnId,
-        "gen_ai.step_id": currentStepId || turnId,
-        "gen_ai.role": "tool",
-        "gen_ai.tool_name": effectiveName,
-        "gen_ai.tool_arguments": JSON.stringify(effectiveInput),
-        "gen_ai.tool_results": JSON.stringify(extractToolResult(ev.tool_response)),
-        "gen_ai.tool_call_id": ev.tool_use_id || "",
+        time_unix_nano: Math.round((preEv.timestamp || evTs) * 1e9),
+        "event.id": crypto.randomUUID(),
+        "event.name": "tool.call",
+        ...base,
+        "step.id": currentStepId || turnId,
+        "message.role": "tool",
+        "tool.name": effectiveName,
+        "tool.call.id": ev.tool_use_id || "",
+        "tool.arguments": JSON.stringify(effectiveInput),
       });
+
+      const toolErr = extractToolError(ev.tool_response);
+      const durationMs = preEv.timestamp ? (evTs - preEv.timestamp) * 1000 : undefined;
+      const resultRecord = {
+        time_unix_nano: Math.round(evTs * 1e9),
+        "event.id": crypto.randomUUID(),
+        "event.name": "tool.result",
+        ...base,
+        "step.id": currentStepId || turnId,
+        "message.role": "tool",
+        "tool.name": effectiveName,
+        "tool.call.id": ev.tool_use_id || "",
+        "tool.result": JSON.stringify(extractToolResult(ev.tool_response)),
+        "tool.result.status": toolErr ? "error" : "success",
+      };
+
+      if (durationMs !== undefined) {
+        resultRecord["tool.result.duration_ms"] = durationMs;
+      }
+
+      if (toolErr) {
+        resultRecord["is_error"] = true;
+        resultRecord["error.type"] = toolErr.type || "ToolError";
+        resultRecord["error.message"] = toolErr.message || "unknown error";
+      }
+
+      records.push(resultRecord);
     }
   }
 
@@ -825,15 +880,15 @@ function generateTurnLogRecords(turn, turnIndex, sessionId, model, prevHash, tra
     const toolName = preEv.tool_name || "unknown";
     if (toolName === "Agent" || toolName === "agent") continue;
     records.push({
-      timestamp_ns: Math.round((preEv.timestamp || turn.endTime) * 1e9),
-      trace_id: traceId || null,
-      "gen_ai.session_id": sessionId,
-      "gen_ai.turn_id": turnId,
-      "gen_ai.step_id": currentStepId || turnId,
-      "gen_ai.role": "tool",
-      "gen_ai.tool_name": toolName,
-      "gen_ai.tool_arguments": JSON.stringify(preEv.tool_input || {}),
-      "gen_ai.tool_call_id": toolUseId,
+      time_unix_nano: Math.round((preEv.timestamp || turn.endTime) * 1e9),
+      "event.id": crypto.randomUUID(),
+      "event.name": "tool.call",
+      ...base,
+      "step.id": currentStepId || turnId,
+      "message.role": "tool",
+      "tool.name": toolName,
+      "tool.call.id": toolUseId,
+      "tool.arguments": JSON.stringify(preEv.tool_input || {}),
     });
   }
 

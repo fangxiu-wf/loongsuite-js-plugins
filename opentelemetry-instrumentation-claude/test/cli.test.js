@@ -846,7 +846,18 @@ describe("generateTurnLogRecords", () => {
   const model = "claude-sonnet-4-5-20250514";
   const traceId = "abc123def456";
 
-  test("single LLM call turn generates user + assistant records", () => {
+  function expectCommonFields(rec, sessionId, traceId) {
+    expect(rec["event.id"]).toBeDefined();
+    expect(rec["event.id"]).toHaveLength(36);
+    expect(rec["event.name"]).toBeDefined();
+    expect(rec["session.id"]).toBe(sessionId);
+    expect(rec["agent.type"]).toBe("claude-code");
+    expect(rec["agent.name"]).toBe("claude-code");
+    expect(rec["user.id"]).toBeDefined();
+    if (traceId) expect(rec.trace_id).toBe(traceId);
+  }
+
+  test("single LLM call turn generates user request + llm.request + llm.response", () => {
     const turn = {
       prompt: "Hello",
       startTime: 1000,
@@ -869,26 +880,38 @@ describe("generateTurnLogRecords", () => {
     };
     const { records, hash } = cli._generateTurnLogRecords(turn, 0, sessionId, model, INITIAL_HASH, traceId);
 
-    expect(records).toHaveLength(2);
+    expect(records).toHaveLength(3);
 
     const userRec = records[0];
-    expect(userRec["gen_ai.role"]).toBe("user");
-    expect(userRec["gen_ai.session_id"]).toBe(sessionId);
-    expect(userRec["gen_ai.turn_id"]).toBe(`${sessionId}:t1`);
-    expect(userRec.trace_id).toBe(traceId);
+    expectCommonFields(userRec, sessionId, traceId);
+    expect(userRec["event.name"]).toBe("llm.request");
+    expect(userRec["message.role"]).toBe("user");
+    expect(userRec["turn.id"]).toBe(`${sessionId}:t1`);
+    expect(userRec["input.messages_delta"]).toBeDefined();
 
-    const llmRec = records[1];
-    expect(llmRec["gen_ai.role"]).toBe("assistant");
-    expect(llmRec["gen_ai.step_id"]).toBe(`${sessionId}:t1:s1`);
-    expect(llmRec["gen_ai.input_tokens"]).toBe(10);
-    expect(llmRec["gen_ai.output_tokens"]).toBe(5);
-    expect(llmRec["gen_ai.request_model"]).toBe(model);
-    expect(llmRec["gen_ai.input_messages_hash"]).toHaveLength(32);
-    expect(llmRec["gen_ai.output_messages"]).toBeDefined();
-    expect(hash).toBe(llmRec["gen_ai.input_messages_hash"]);
+    const reqRec = records[1];
+    expectCommonFields(reqRec, sessionId, traceId);
+    expect(reqRec["event.name"]).toBe("llm.request");
+    expect(reqRec["message.role"]).toBe("assistant");
+    expect(reqRec["step.id"]).toBe(`${sessionId}:t1:s1`);
+    expect(reqRec["request.model"]).toBe(model);
+    expect(reqRec["input.messages_hash"]).toHaveLength(32);
+    expect(reqRec["input.messages_delta"]).toBeDefined();
+
+    const respRec = records[2];
+    expectCommonFields(respRec, sessionId, traceId);
+    expect(respRec["event.name"]).toBe("llm.response");
+    expect(respRec["message.role"]).toBe("assistant");
+    expect(respRec["step.id"]).toBe(`${sessionId}:t1:s1`);
+    expect(respRec["usage.input_tokens"]).toBe(10);
+    expect(respRec["usage.output_tokens"]).toBe(5);
+    expect(respRec["usage.total_tokens"]).toBe(15);
+    expect(respRec["request.model"]).toBe(model);
+    expect(respRec["output.messages"]).toBeDefined();
+    expect(hash).toBe(reqRec["input.messages_hash"]);
   });
 
-  test("multi-step turn generates user + assistant + tool + assistant", () => {
+  test("multi-step turn generates split events for LLM and tools", () => {
     const turn = {
       prompt: "List files",
       startTime: 1000,
@@ -937,18 +960,30 @@ describe("generateTurnLogRecords", () => {
     };
     const { records } = cli._generateTurnLogRecords(turn, 0, sessionId, model, INITIAL_HASH, traceId);
 
-    expect(records).toHaveLength(4);
-    expect(records[0]["gen_ai.role"]).toBe("user");
-    expect(records[1]["gen_ai.role"]).toBe("assistant");
-    expect(records[1]["gen_ai.step_id"]).toBe(`${sessionId}:t1:s1`);
-    expect(records[2]["gen_ai.role"]).toBe("tool");
-    expect(records[2]["gen_ai.tool_name"]).toBe("Bash");
-    expect(records[2]["gen_ai.tool_call_id"]).toBe("t1");
-    expect(records[3]["gen_ai.role"]).toBe("assistant");
-    expect(records[3]["gen_ai.step_id"]).toBe(`${sessionId}:t1:s2`);
+    // user(llm.request) + llm.request + llm.response + tool.call + tool.result + llm.request + llm.response
+    expect(records).toHaveLength(7);
+    expect(records[0]["event.name"]).toBe("llm.request");
+    expect(records[0]["message.role"]).toBe("user");
+    expect(records[1]["event.name"]).toBe("llm.request");
+    expect(records[1]["message.role"]).toBe("assistant");
+    expect(records[1]["step.id"]).toBe(`${sessionId}:t1:s1`);
+    expect(records[2]["event.name"]).toBe("llm.response");
+    expect(records[2]["step.id"]).toBe(`${sessionId}:t1:s1`);
+    expect(records[3]["event.name"]).toBe("tool.call");
+    expect(records[3]["tool.name"]).toBe("Bash");
+    expect(records[3]["tool.call.id"]).toBe("t1");
+    expect(records[4]["event.name"]).toBe("tool.result");
+    expect(records[4]["tool.name"]).toBe("Bash");
+    expect(records[4]["tool.call.id"]).toBe("t1");
+    expect(records[4]["tool.result.status"]).toBe("success");
+    expect(records[4]["tool.result.duration_ms"]).toBe(500);
+    expect(records[5]["event.name"]).toBe("llm.request");
+    expect(records[5]["step.id"]).toBe(`${sessionId}:t1:s2`);
+    expect(records[6]["event.name"]).toBe("llm.response");
+    expect(records[6]["step.id"]).toBe(`${sessionId}:t1:s2`);
   });
 
-  test("error LLM call includes error fields", () => {
+  test("error LLM call includes error fields on llm.response", () => {
     const turn = {
       prompt: "test",
       startTime: 1000,
@@ -966,12 +1001,13 @@ describe("generateTurnLogRecords", () => {
       }],
     };
     const { records } = cli._generateTurnLogRecords(turn, 0, sessionId, model, INITIAL_HASH, null);
-    const llmRec = records.find(r => r["gen_ai.role"] === "assistant");
-    expect(llmRec["gen_ai.error_type"]).toBe("LLMError");
-    expect(llmRec["gen_ai.error_message"]).toBe("rate limit exceeded");
+    const respRec = records.find(r => r["event.name"] === "llm.response");
+    expect(respRec["is_error"]).toBe(true);
+    expect(respRec["error.type"]).toBe("LLMError");
+    expect(respRec["error.message"]).toBe("rate limit exceeded");
   });
 
-  test("orphaned pre_tool_use generates tool record without results", () => {
+  test("orphaned pre_tool_use generates tool.call without tool.result", () => {
     const turn = {
       prompt: null,
       startTime: 1000,
@@ -986,10 +1022,10 @@ describe("generateTurnLogRecords", () => {
     };
     const { records } = cli._generateTurnLogRecords(turn, 0, sessionId, model, INITIAL_HASH, null);
     expect(records).toHaveLength(1);
-    expect(records[0]["gen_ai.role"]).toBe("tool");
-    expect(records[0]["gen_ai.tool_name"]).toBe("Read");
-    expect(records[0]["gen_ai.tool_call_id"]).toBe("orphan1");
-    expect(records[0]["gen_ai.tool_results"]).toBeUndefined();
+    expect(records[0]["event.name"]).toBe("tool.call");
+    expect(records[0]["tool.name"]).toBe("Read");
+    expect(records[0]["tool.call.id"]).toBe("orphan1");
+    expect(records[0]["tool.result"]).toBeUndefined();
   });
 
   test("Agent tool calls are skipped", () => {
@@ -1003,8 +1039,9 @@ describe("generateTurnLogRecords", () => {
       ],
     };
     const { records } = cli._generateTurnLogRecords(turn, 0, sessionId, model, INITIAL_HASH, null);
-    expect(records).toHaveLength(1); // only user record
-    expect(records[0]["gen_ai.role"]).toBe("user");
+    expect(records).toHaveLength(1); // only user llm.request
+    expect(records[0]["event.name"]).toBe("llm.request");
+    expect(records[0]["message.role"]).toBe("user");
   });
 
   test("hash chaining — second turn uses first turn hash as prevHash", () => {
@@ -1044,15 +1081,15 @@ describe("generateTurnLogRecords", () => {
     const r1 = cli._generateTurnLogRecords(turn1, 0, sessionId, model, INITIAL_HASH, null);
     const r2 = cli._generateTurnLogRecords(turn2, 1, sessionId, model, r1.hash, null);
 
-    const hash1 = r1.records.find(r => r["gen_ai.role"] === "assistant")["gen_ai.input_messages_hash"];
-    const hash2 = r2.records.find(r => r["gen_ai.role"] === "assistant")["gen_ai.input_messages_hash"];
+    const hash1 = r1.records.find(r => r["event.name"] === "llm.request" && r["message.role"] === "assistant")["input.messages_hash"];
+    const hash2 = r2.records.find(r => r["event.name"] === "llm.request" && r["message.role"] === "assistant")["input.messages_hash"];
 
     expect(hash1).not.toBe(hash2);
     expect(hash1).toHaveLength(32);
     expect(hash2).toHaveLength(32);
   });
 
-  test("first LLM call with matching hash does not log full input_messages", () => {
+  test("first LLM call with matching hash does not log full input.messages", () => {
     const turn = {
       prompt: "test",
       startTime: 1000,
@@ -1068,12 +1105,12 @@ describe("generateTurnLogRecords", () => {
       }],
     };
     const { records } = cli._generateTurnLogRecords(turn, 0, sessionId, model, INITIAL_HASH, null);
-    const llmRec = records.find(r => r["gen_ai.role"] === "assistant");
-    expect(llmRec["gen_ai.input_messages"]).toBeUndefined();
-    expect(llmRec["gen_ai.input_messages_delta"]).toBeDefined();
+    const reqRec = records.find(r => r["event.name"] === "llm.request" && r["message.role"] === "assistant");
+    expect(reqRec["input.messages"]).toBeUndefined();
+    expect(reqRec["input.messages_delta"]).toBeDefined();
   });
 
-  test("logs full input_messages when hash mismatches (context change)", () => {
+  test("logs full input.messages when hash mismatches (context change)", () => {
     const turn = {
       prompt: "test",
       startTime: 1000,
@@ -1090,12 +1127,12 @@ describe("generateTurnLogRecords", () => {
     };
     const wrongPrevHash = "f".repeat(32);
     const { records } = cli._generateTurnLogRecords(turn, 0, sessionId, model, wrongPrevHash, null);
-    const llmRec = records.find(r => r["gen_ai.role"] === "assistant");
-    expect(llmRec["gen_ai.input_messages"]).toBeDefined();
-    expect(llmRec["gen_ai.input_messages_delta"]).toBeDefined();
+    const reqRec = records.find(r => r["event.name"] === "llm.request" && r["message.role"] === "assistant");
+    expect(reqRec["input.messages"]).toBeDefined();
+    expect(reqRec["input.messages_delta"]).toBeDefined();
   });
 
-  test("no prompt — no user record generated", () => {
+  test("no prompt — no user llm.request generated", () => {
     const turn = {
       prompt: null,
       startTime: 1000,
@@ -1111,7 +1148,26 @@ describe("generateTurnLogRecords", () => {
       }],
     };
     const { records } = cli._generateTurnLogRecords(turn, 0, sessionId, model, INITIAL_HASH, null);
-    expect(records.filter(r => r["gen_ai.role"] === "user")).toHaveLength(0);
-    expect(records.filter(r => r["gen_ai.role"] === "assistant")).toHaveLength(1);
+    expect(records.filter(r => r["message.role"] === "user")).toHaveLength(0);
+    // llm.request (assistant) + llm.response
+    expect(records.filter(r => r["message.role"] === "assistant")).toHaveLength(2);
+  });
+
+  test("tool error sets is_error and error fields on tool.result", () => {
+    const turn = {
+      prompt: null,
+      startTime: 1000,
+      endTime: 1002,
+      events: [
+        { type: "pre_tool_use", timestamp: 1000.5, tool_name: "Bash", tool_input: { command: "rm -rf /" }, tool_use_id: "e1" },
+        { type: "post_tool_use", timestamp: 1001.5, tool_name: "Bash", tool_response: { isError: true, error: "Permission denied" }, tool_use_id: "e1" },
+      ],
+    };
+    const { records } = cli._generateTurnLogRecords(turn, 0, sessionId, model, INITIAL_HASH, null);
+    const resultRec = records.find(r => r["event.name"] === "tool.result");
+    expect(resultRec["tool.result.status"]).toBe("error");
+    expect(resultRec["is_error"]).toBe(true);
+    expect(resultRec["error.message"]).toContain("Permission denied");
+    expect(resultRec["tool.result.duration_ms"]).toBe(1000);
   });
 });
