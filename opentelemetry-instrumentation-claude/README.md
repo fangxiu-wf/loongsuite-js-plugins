@@ -204,7 +204,7 @@ export OTEL_CLAUDE_LOG_DIR="~/.ai-agent-collector/logs/claude-code"
 日志文件格式：
 - 默认路径：`<log_dir>/claude-code.jsonl.YYYYMMDD`
 - 可通过 `log_filename_format: "hook"` 切换为 `<log_dir>/claude-code-YYYY-MM-DD.jsonl`（兼容 ai-agent-collector 的 BaseHookInput）
-- 每行一个 JSON 对象，包含 `gen_ai.role`（user/assistant/tool）、`gen_ai.session_id`、token 用量等字段
+- 每行一个 JSON 对象，遵循 AI Agent EventSchema（event_t）规范，包含 `event.name`（`llm.request`/`llm.response`/`tool.call`/`tool.result`）、`session.id`、`message.role`、token 用量等字段
 - 按天自动轮转
 
 ---
@@ -413,8 +413,10 @@ opentelemetry-instrumentation-claude/
 
 6. **JSONL 日志采集**（可选）：当 `log_enabled=true` 时，`logger.js` 在 trace 导出完成后将每轮对话的详细记录写入本地 JSONL 文件：
    - 文件路径：`<log_dir>/claude-code.jsonl.YYYYMMDD`，按天自动轮转
-   - 每条记录包含 `trace_id`（与 OTel trace 关联）、session/turn/step 标识、token 用量、消息内容
-   - **Chain hash 增量校验**：使用 `H_n = sha256(H_{n-1} + serialize(msg_n))` 算法检测消息是否被上下文压缩修改。仅在 hash 不匹配时记录完整 `input_messages`，正常情况下只记录增量 `delta`，大幅节省存储
+   - 每条记录遵循 AI Agent EventSchema（event_t）规范：`event.name` 区分事件类型（`llm.request`/`llm.response`/`tool.call`/`tool.result`），包含 `event.id`、`session.id`、`turn.id`、`step.id`、`message.role`、`user.id`、`agent.type` 等标准字段
+   - LLM 请求和响应拆分为独立事件：`llm.request` 携带 `input.messages_delta`/`input.messages_hash`，`llm.response` 携带 `output.messages`/`usage.*` token 用量
+   - 工具调用和结果拆分为独立事件：`tool.call` 携带 `tool.arguments`，`tool.result` 携带 `tool.result`/`tool.result.status`/`tool.result.duration_ms`
+   - **Chain hash 增量校验**：使用 `H_n = sha256(H_{n-1} + serialize(msg_n))` 算法检测消息是否被上下文压缩修改。仅在 hash 不匹配时记录完整 `input.messages`，正常情况下只记录增量 `input.messages_delta`，大幅节省存储
 
 ---
 
