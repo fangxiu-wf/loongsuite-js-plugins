@@ -6,6 +6,15 @@ OpenAI Codex CLI 的 OpenTelemetry 可观测插件 — 将 AI Agent 执行链路
 
 多轮会话中，每一轮产生独立的 trace（唯一 traceId），所有轮次共享同一个 `gen_ai.session.id`。
 
+### 数据输出方式
+
+插件支持两种数据输出方式，可同时启用：
+
+| 方式 | 说明 | 用途 |
+|------|------|------|
+| **OTLP 导出** | 直接上报到任何 OTLP 兼容后端 | 独立使用，接入 Jaeger / ARMS / Grafana Tempo 等 |
+| **JSONL 日志** | 写入本地 JSONL 文件（event_t schema） | 与 [ai-agent-collector](https://github.com/alibaba/loongcollector) 集成，集中采集多个 Agent 数据 |
+
 ## Span 层级结构
 
 遵循 [ARMS GenAI 语义规范](https://opentelemetry.io/docs/specs/semconv/gen-ai/)：
@@ -44,13 +53,39 @@ Token 数据来源于 Codex 的 transcript JSONL 文件（`~/.codex/sessions/...
 
 ## 快速开始
 
+### 方式一：一行远程安装（推荐）
+
 ```bash
+curl -fsSL https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-codex/remote-install.sh | bash -s -- \
+  --endpoint "https://your-otlp-endpoint:4318" \
+  --service-name "my-codex-agent"
+```
+
+支持的参数：
+
+| 参数 | 说明 |
+|------|------|
+| `--endpoint <url>` | OTLP 后端地址，写入 `~/.codex/otel-config.json` |
+| `--service-name <name>` | 服务名 |
+| `--headers <kv>` | OTLP 请求头（逗号分隔的 key=value） |
+| `--debug` | 启用调试输出 |
+| `--tarball-url <url>` | 覆盖默认的 tarball 下载地址 |
+| `--lang zh\|en` | 强制输出语言 |
+
+### 方式二：本地安装
+
+```bash
+# 从源码安装
+cd opentelemetry-instrumentation-codex
+bash scripts/install.sh
+
+# 或通过 npm 全局安装
 npm install -g @loongsuite/opentelemetry-instrumentation-codex
 ```
 
 安装时自动将 hooks 注册到 `~/.codex/config.toml`。
 
-验证安装：
+### 验证安装
 
 ```bash
 otel-codex-hook check-env
@@ -83,6 +118,30 @@ otel-codex-hook check-env
   "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "SPAN_ONLY"
 }
 ```
+
+### otel-config.json（JSONL 日志输出）
+
+通过 `~/.codex/otel-config.json` 配置 JSONL 日志输出（用于与 ai-agent-collector 集成）：
+
+```json
+{
+  "log_enabled": true,
+  "log_dir": "~/.ai-agent-collector/logs/codex",
+  "log_filename_format": "hook"
+}
+```
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `log_enabled` | 是否启用 JSONL 日志输出 | `false` |
+| `log_dir` | 日志输出目录 | `~/.cache/opentelemetry.instrumentation.codex/sessions` |
+| `log_filename_format` | 日志文件名格式：`hook`（按日期滚动）或 `session`（按会话） | `session` |
+| `otlp_endpoint` | OTLP 后端地址（也可通过环境变量设置） | — |
+| `otlp_headers` | OTLP 请求头 | — |
+| `service_name` | 服务名 | — |
+| `debug` | 调试模式 | `false` |
+
+> `log_filename_format` 为 `hook` 时，文件名为 `codex-YYYY-MM-DD.jsonl`（按日期滚动）；为 `session` 时，文件名为 `<session-id>.jsonl`。
 
 ### 环境变量
 
@@ -149,7 +208,7 @@ export CODEX_TELEMETRY_DEBUG=1
 otel-codex-hook install             # 将 hooks 注册到 ~/.codex/config.toml
 otel-codex-hook uninstall           # 从 config.toml 移除 hooks
 otel-codex-hook uninstall --purge   # 同时删除缓存和会话数据
-otel-codex-hook check-env           # 检查 OTLP 配置状态
+otel-codex-hook check-env           # 检查配置状态（OTLP + JSONL 日志）
 otel-codex-hook show-config         # 打印 hook 配置（TOML/JSON 格式）
 ```
 
@@ -189,13 +248,41 @@ hooks = [{ type = "command", command = "otel-codex-hook stop" }]
 
 ---
 
+## 卸载
+
+```bash
+# 方式一：使用卸载脚本
+bash scripts/uninstall.sh
+
+# 方式二：使用 CLI
+otel-codex-hook uninstall
+
+# 完全清理（包括缓存和会话数据）
+otel-codex-hook uninstall --purge
+```
+
+卸载会移除 `~/.codex/config.toml` 中的 hooks 配置和 `~/.local/bin/otel-codex-hook` wrapper（如果存在）。会话数据保留在 `~/.cache/opentelemetry.instrumentation.codex/sessions/`，如需完全删除：
+
+```bash
+rm -rf ~/.cache/opentelemetry.instrumentation.codex
+```
+
+---
+
 ## 开发
 
 ```bash
-pnpm install
-pnpm run build      # 编译 TypeScript
-pnpm run dev        # 监听模式
-pnpm run typecheck  # 仅类型检查
+npm install
+npm run build       # 编译 TypeScript（tsup）
+npm run dev         # 监听模式
+npm run typecheck   # 仅类型检查
+```
+
+### 打包
+
+```bash
+bash scripts/pack.sh
+# 输出: dist/otel-codex-hook.tar.gz
 ```
 
 要求 Node.js >= 18.0.0。
@@ -204,4 +291,4 @@ pnpm run typecheck  # 仅类型检查
 
 ## 许可证
 
-Apache-2.0 — 详见 [LICENSE](./LICENSE)。
+Apache-2.0 — 详见 [LICENSE](../LICENSE)。
