@@ -21,7 +21,7 @@ import type { TranscriptData, TokenUsage } from "./transcript.js";
 
 // --- Internal models ---
 
-interface ToolRecord {
+export interface ToolRecord {
   tool_name: string;
   tool_use_id: string;
   tool_input: unknown;
@@ -30,7 +30,7 @@ interface ToolRecord {
   end_time: number;
 }
 
-interface ReActStep {
+export interface ReActStep {
   round: number;
   start_time: number;
   end_time: number;
@@ -202,7 +202,7 @@ function replayTurn(
 
 // --- ReAct step construction ---
 
-function buildReactSteps(turn: Turn): ReActStep[] {
+export function buildReactSteps(turn: Turn): ReActStep[] {
   const events = turn.events;
   const steps: ReActStep[] = [];
 

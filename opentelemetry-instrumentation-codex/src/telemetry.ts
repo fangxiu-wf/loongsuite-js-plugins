@@ -6,7 +6,13 @@ import {
 } from "@opentelemetry/sdk-trace-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { Resource } from "@opentelemetry/resources";
-import { loadOtelConfig } from "./config.js";
+import {
+  getEndpoint,
+  getHeaders,
+  getServiceName,
+  getResourceAttributes,
+  isDebug,
+} from "./config.js";
 
 const MAX_ATTRIBUTE_LENGTH = 1 * 1024 * 1024;
 const ACS_ARMS_SERVICE_FEATURE = "acs.arms.service.feature";
@@ -14,10 +20,10 @@ const ACS_ARMS_SERVICE_FEATURE = "acs.arms.service.feature";
 let _provider: NodeTracerProvider | null = null;
 
 function resolveServiceName(defaultName = "codex-agent"): string {
-  const envName = (process.env["OTEL_SERVICE_NAME"] || "").trim();
-  if (envName) return envName;
+  const name = getServiceName();
+  if (name) return name;
 
-  for (const attr of (process.env["OTEL_RESOURCE_ATTRIBUTES"] || "").split(",")) {
+  for (const attr of getResourceAttributes().split(",")) {
     const trimmed = attr.trim();
     if (trimmed.startsWith("service.name=")) {
       return trimmed.slice("service.name=".length).trim();
@@ -29,7 +35,7 @@ function resolveServiceName(defaultName = "codex-agent"): string {
 
 function parseOtlpHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
-  const raw = process.env["OTEL_EXPORTER_OTLP_HEADERS"] || "";
+  const raw = getHeaders();
   if (!raw) return headers;
   for (const pair of raw.split(",")) {
     const idx = pair.indexOf("=");
@@ -55,12 +61,7 @@ function createProvider(serviceName: string): NodeTracerProvider {
 export function configureTelemetry(serviceName = "codex-agent"): NodeTracerProvider {
   if (_provider) return _provider;
 
-  const configPath = loadOtelConfig();
-  if (configPath) {
-    process.stderr.write(`[otel-codex-hook] Loaded config from ${configPath}\n`);
-  }
-
-  const endpoint = process.env["OTEL_EXPORTER_OTLP_ENDPOINT"];
+  const endpoint = getEndpoint();
   if (endpoint) {
     const provider = createProvider(serviceName);
     const otlpUrl = endpoint.endsWith("/v1/traces")
@@ -83,7 +84,7 @@ export function configureTelemetry(serviceName = "codex-agent"): NodeTracerProvi
     return provider;
   }
 
-  if (process.env["CODEX_TELEMETRY_DEBUG"]) {
+  if (isDebug()) {
     const provider = createProvider(serviceName);
     provider.addSpanProcessor(
       new BatchSpanProcessor(new ConsoleSpanExporter(), {

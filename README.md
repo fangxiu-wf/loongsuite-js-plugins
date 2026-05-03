@@ -11,7 +11,7 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-1.x-blueviolet.svg)](https://opentelemetry.io)
 
-LoongSuite JS Plugins is a key component of LoongSuite, Alibaba's unified observability data collection suite, providing OpenTelemetry instrumentation plugins for JavaScript-based AI coding agents. Collect traces, tool calls, and LLM metrics from [Claude Code](https://www.anthropic.com/claude-code) and [OpenClaw](https://openclaw.ai) — zero code changes required.
+LoongSuite JS Plugins is a key component of LoongSuite, Alibaba's unified observability data collection suite, providing OpenTelemetry instrumentation plugins for JavaScript-based AI coding agents. Collect traces, tool calls, and LLM metrics from [Claude Code](https://www.anthropic.com/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), and [OpenClaw](https://openclaw.ai) — zero code changes required.
 
 LoongSuite includes the following key components:
 * [LoongCollector](https://github.com/alibaba/loongcollector): universal node agent, which provides log collection, Prometheus metric collection, and network and security collection capabilities based on eBPF.
@@ -28,9 +28,10 @@ LoongSuite includes the following key components:
 | Plugin | Platform | Description |
 |--------|----------|-------------|
 | [opentelemetry-instrumentation-claude](./opentelemetry-instrumentation-claude/) | Claude Code | Hook-based session tracing + in-process LLM call capture via `intercept.js` |
+| [opentelemetry-instrumentation-codex](./opentelemetry-instrumentation-codex/) | OpenAI Codex CLI | Hook-based session tracing with JSONL event logging |
 | [opentelemetry-instrumentation-openclaw](./opentelemetry-instrumentation-openclaw/) | OpenClaw | Native gateway plugin: Traces + Metrics to any OTLP backend |
 
-Both plugins follow the [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) and work with any OTLP-compatible backend (Jaeger, Honeycomb, Alibaba Sunfire, Grafana Tempo, Alibaba Cloud ARMS, etc.).
+All plugins follow the [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) and work with any OTLP-compatible backend (Jaeger, Honeycomb, Alibaba Sunfire, Grafana Tempo, Alibaba Cloud ARMS, etc.).
 
 ---
 
@@ -63,6 +64,33 @@ The script automatically installs hooks, sets up the `claude` alias, and writes 
 
 ---
 
+### OpenAI Codex CLI — 5 minutes to first trace
+
+**One-line install (with OTLP backend):**
+
+```bash
+curl -fsSL https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-codex/remote-install.sh | bash -s -- \
+  --endpoint "https://your-otlp-endpoint:4318" \
+  --service-name "my-codex-agent"
+```
+
+The script installs hooks into `~/.codex/config.toml` and registers `otel-codex-hook` on PATH. Traces appear in your backend automatically. The event log looks like:
+
+```
+📦 Codex Session: "Fix the login bug..."
+├── 👤 user-prompt-submit: Fix the login bug...
+│   ├── 🔧 pre-tool-use: shell (cd src && grep -r "login")
+│   ├── 🔧 post-tool-use: shell (result captured)
+│   └── 🧠 llm.response
+│       ├── input_tokens:  8734
+│       └── output_tokens: 512
+└── 🛑 stop
+```
+
+📖 [Full documentation → opentelemetry-instrumentation-codex](./opentelemetry-instrumentation-codex/README.md)
+
+---
+
 ### OpenClaw — one-line install
 
 ```bash
@@ -84,6 +112,11 @@ loongsuite-js-plugins/
 │   ├── test/                               # Jest test suite (101 tests)
 │   ├── scripts/                            # Install / uninstall / pack scripts
 │   ├── bin/otel-claude-hook                # CLI entry point
+│   └── README.md
+├── opentelemetry-instrumentation-codex/    # OpenAI Codex CLI plugin (TypeScript)
+│   ├── src/                                # TypeScript source files
+│   ├── scripts/                            # Install / uninstall / pack scripts
+│   ├── bin/otel-codex-hook                 # CLI entry point
 │   └── README.md
 └── opentelemetry-instrumentation-openclaw/ # OpenClaw platform plugin (TypeScript)
     ├── src/                                # TypeScript source files
@@ -161,6 +194,13 @@ chore:    build / toolchain
 | `OTEL_CLAUDE_LANG` | Force language: `zh` or `en` (default: auto-detect) |
 | `OTEL_CLAUDE_HOOK_CMD` | Override hook command name |
 
+### Codex plugin specific
+
+| Variable | Description |
+|----------|-------------|
+| `OTEL_CODEX_LANG` | Force language: `zh` or `en` (default: auto-detect) |
+| `OTEL_CODEX_TARBALL_URL` | Override tarball download URL for remote install |
+
 ---
 
 ## 🤝 Contributing
@@ -191,6 +231,7 @@ Apache-2.0 — see [LICENSE](./LICENSE) for details.
 - [OpenTelemetry](https://opentelemetry.io)
 - [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 - [Claude Code](https://www.anthropic.com/claude-code)
+- [OpenAI Codex CLI](https://github.com/openai/codex)
 - [OpenClaw](https://openclaw.ai)
 
 ## Community

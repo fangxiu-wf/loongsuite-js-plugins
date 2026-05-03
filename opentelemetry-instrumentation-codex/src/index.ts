@@ -1,5 +1,17 @@
 export { configureTelemetry, shutdownTelemetry } from "./telemetry.js";
-export { loadOtelConfig } from "./config.js";
+export {
+  CONFIG_PATH,
+  loadConfigFile,
+  resetConfigCache,
+  getEndpoint,
+  getHeaders,
+  getServiceName,
+  getResourceAttributes,
+  isDebug,
+  isLogEnabled,
+  getLogDir,
+  getLogFilenameFormat,
+} from "./config.js";
 export {
   loadState,
   saveState,

@@ -2,12 +2,21 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { ExtendedTelemetryHandler } from "@loongsuite/opentelemetry-util-genai";
-import { loadState, saveState, clearState } from "./state.js";
+import { loadState, saveState, clearState, splitIntoTurns } from "./state.js";
 import type { SessionState } from "./state.js";
 import { configureTelemetry, shutdownTelemetry } from "./telemetry.js";
-import { replaySession } from "./replay.js";
-import { loadOtelConfig } from "./config.js";
+import { replaySession, buildReactSteps } from "./replay.js";
+import {
+  CONFIG_PATH,
+  getEndpoint,
+  getHeaders,
+  isDebug,
+  isLogEnabled as configIsLogEnabled,
+  getLogDir,
+} from "./config.js";
 import { parseTranscript } from "./transcript.js";
+import { isLogEnabled, writeLogRecords } from "./logger.js";
+import { generateTurnLogRecords } from "./log-records.js";
 
 // --- stdin reading ---
 
@@ -140,10 +149,15 @@ export async function cmdStop(): Promise<void> {
     );
   }
 
+  // Split turns for both OTLP export and JSONL logging
+  const turns = splitIntoTurns(state);
+
+  // --- OTLP trace export ---
+  let traceIds: string[] = [];
   try {
     const provider = configureTelemetry();
     const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
-    const traceIds = replaySession(handler, state, transcriptData);
+    traceIds = replaySession(handler, state, transcriptData);
     await shutdownTelemetry();
     if (traceIds.length > 0) {
       process.stderr.write(
@@ -159,12 +173,46 @@ export async function cmdStop(): Promise<void> {
     process.stderr.write(`[otel-codex-hook] Export failed: ${msg}\n`);
     if (msg.includes("NO TELEMETRY BACKEND")) {
       process.stderr.write(
-        "[otel-codex-hook] Hint: place OTLP config in ./codex.config.json or ~/.codex/otel.config.json\n",
+        "[otel-codex-hook] Hint: configure OTLP endpoint in ~/.codex/otel-config.json\n",
       );
     }
-  } finally {
-    clearState(sessionId);
   }
+
+  // --- JSONL log output (independent of OTLP) ---
+  if (isLogEnabled()) {
+    try {
+      const allRecords: Record<string, unknown>[] = [];
+      const logTokenQueue = transcriptData?.tokenEvents
+        ? [...transcriptData.tokenEvents]
+        : [];
+      const provider = transcriptData?.modelProvider || "openai";
+      for (let i = 0; i < turns.length; i++) {
+        const stepCount = buildReactSteps(turns[i]!).length;
+        const turnTokenSlice = logTokenQueue.splice(0, stepCount);
+        const { records } = generateTurnLogRecords(
+          turns[i]!,
+          i,
+          sessionId,
+          state.model,
+          provider,
+          turnTokenSlice,
+          traceIds[i] ?? null,
+        );
+        allRecords.push(...records);
+      }
+      writeLogRecords(allRecords);
+      process.stderr.write(
+        `[otel-codex-hook] Wrote ${allRecords.length} log records\n`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `[otel-codex-hook] Log writing failed (non-fatal): ${msg}\n`,
+      );
+    }
+  }
+
+  clearState(sessionId);
 }
 
 // --- Install / Uninstall ---
@@ -262,7 +310,6 @@ export function cmdUninstall(opts: {
       fs.writeFileSync(configPath, content, "utf-8");
       process.stderr.write("[otel-codex-hook] Hooks removed from config.toml.\n");
     } else {
-      // Try removing individual hook lines
       const lines = content.split("\n");
       const filtered = lines.filter((l) => !l.includes("otel-codex-hook"));
       if (filtered.length !== lines.length) {
@@ -295,17 +342,16 @@ export function cmdShowConfig(): void {
 }
 
 export function cmdCheckEnv(): void {
-  const configPath = loadOtelConfig();
-  if (configPath) {
-    process.stdout.write(`Config file: ${configPath}\n`);
-  }
+  process.stdout.write(`Config file: ${CONFIG_PATH}\n`);
 
-  const endpoint = process.env["OTEL_EXPORTER_OTLP_ENDPOINT"];
-  const debug = process.env["CODEX_TELEMETRY_DEBUG"];
+  const endpoint = getEndpoint();
+  const debug = isDebug();
+  const logEnabled = configIsLogEnabled();
+  const logDir = getLogDir();
 
   if (endpoint) {
     process.stdout.write(`OTLP endpoint: ${endpoint}\n`);
-    const headers = process.env["OTEL_EXPORTER_OTLP_HEADERS"];
+    const headers = getHeaders();
     if (headers) {
       const keys = headers
         .split(",")
@@ -313,20 +359,25 @@ export function cmdCheckEnv(): void {
         .filter(Boolean);
       process.stdout.write(`OTLP headers: ${keys.join(", ")}\n`);
     }
-    const protocol = process.env["OTEL_EXPORTER_OTLP_PROTOCOL"];
-    if (protocol) {
-      process.stdout.write(`OTLP protocol: ${protocol}\n`);
-    }
     process.stdout.write("Status: READY\n");
   } else if (debug) {
     process.stdout.write("Mode: DEBUG (console output)\n");
     process.stdout.write("Status: READY\n");
   } else {
-    process.stdout.write("Status: NOT CONFIGURED\n");
+    process.stdout.write("Status: NOT CONFIGURED (OTLP)\n");
+  }
+
+  if (logEnabled) {
+    process.stdout.write(`Log output: ENABLED\n`);
+    if (logDir) {
+      process.stdout.write(`Log dir: ${logDir}\n`);
+    }
+  }
+
+  if (!endpoint && !debug && !logEnabled) {
     process.stdout.write(
-      "\nSet OTEL_EXPORTER_OTLP_ENDPOINT, or place a config file at:\n" +
-      "  - ./codex.config.json (project-level)\n" +
-      "  - ~/.codex/otel.config.json (global)\n",
+      "\nNo telemetry backend or log output configured.\n" +
+      "Configure in ~/.codex/otel-config.json\n",
     );
     process.exitCode = 1;
   }
