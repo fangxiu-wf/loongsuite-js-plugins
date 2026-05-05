@@ -2,9 +2,10 @@
 # uninstall.sh — Uninstall all components of otel-codex-hook
 #
 # Steps:
-#   1. Remove hooks from ~/.codex/config.toml
-#   2. Remove ~/.local/bin/otel-codex-hook wrapper (if exists)
-#   3. Print uninstall result
+#   1. Remove hooks + codex_hooks from ~/.codex/config.toml
+#   2. npm uninstall -g otel-codex-hook
+#   3. Remove ~/.local/bin/otel-codex-hook wrapper (if exists)
+#   4. Print uninstall result
 
 set -euo pipefail
 
@@ -67,15 +68,22 @@ if [ -f "$CONFIG_FILE" ]; then
             "    ✅ Hooks config cleaned up (via otel-codex-hook uninstall)"
     elif grep -q "otel-codex-hook" "$CONFIG_FILE" 2>/dev/null; then
         local marker="# OpenTelemetry instrumentation hooks"
-        if grep -q "$marker" "$CONFIG_FILE" 2>/dev/null; then
+        local end_str='command = "otel-codex-hook stop"'
+        if grep -q "$marker" "$CONFIG_FILE" 2>/dev/null && grep -qF "$end_str" "$CONFIG_FILE" 2>/dev/null; then
             local tmp
             tmp=$(mktemp)
-            sed "/$marker/,\$d" "$CONFIG_FILE" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > "$tmp"
+            awk -v m="$marker" -v e="$end_str" '
+                BEGIN { skip=0 }
+                skip==0 && index($0, m) { skip=1; next }
+                skip==1 { if (index($0, e)) { skip=2 }; next }
+                skip==2 && /^[[:space:]]*$/ { next }
+                { skip=0; print }
+            ' "$CONFIG_FILE" > "$tmp"
             mv "$tmp" "$CONFIG_FILE"
         else
             local tmp
             tmp=$(mktemp)
-            grep -v "otel-codex-hook" "$CONFIG_FILE" > "$tmp"
+            grep -v "otel-codex-hook" "$CONFIG_FILE" > "$tmp" || true
             mv "$tmp" "$CONFIG_FILE"
         fi
         msg "    ✅ hooks 配置已清理 (via sed)" \
@@ -88,9 +96,44 @@ else
     msg "    ℹ️  $CONFIG_FILE 不存在，跳过" \
         "    ℹ️  $CONFIG_FILE not found, skipping"
 fi
+
+# Clean up codex_hooks = true from [features] section
+if [ -f "$CONFIG_FILE" ] && grep -q "codex_hooks" "$CONFIG_FILE" 2>/dev/null; then
+    local tmp
+    tmp=$(mktemp)
+    grep -v '^\s*codex_hooks\s*=' "$CONFIG_FILE" > "$tmp" || true
+    # Remove empty [features] section
+    awk '
+        /^\[features\]\s*$/ {
+            hold = $0; next
+        }
+        hold != "" {
+            if (/^[[:space:]]*$/) { next }
+            if (/^\[/) { hold = ""; print; next }
+            print hold; hold = ""; print; next
+        }
+        { print }
+    ' "$tmp" > "${tmp}.2"
+    mv "${tmp}.2" "$CONFIG_FILE"
+    rm -f "$tmp"
+    msg "    ✅ codex_hooks 配置已清理" "    ✅ codex_hooks config cleaned"
+fi
 echo ""
 
-# 2. Remove ~/.local/bin wrapper (if exists)
+# 2. Uninstall npm global package
+msg "==> 清理全局 npm 包..." \
+    "==> Cleaning up global npm package..."
+if npm ls -g otel-codex-hook &>/dev/null; then
+    npm uninstall -g otel-codex-hook 2>/dev/null || true
+    msg "    ✅ npm uninstall -g otel-codex-hook" \
+        "    ✅ npm uninstall -g otel-codex-hook"
+else
+    msg "    ℹ️  未找到全局 npm 包，跳过" \
+        "    ℹ️  No global npm package found, skipping"
+fi
+echo ""
+
+# 3. Remove ~/.local/bin wrapper (if exists)
 LOCAL_WRAPPER="$HOME/.local/bin/otel-codex-hook"
 msg "==> 检查本地 wrapper..." \
     "==> Checking local wrapper..."
@@ -104,7 +147,7 @@ else
 fi
 echo ""
 
-# 3. Done
+# 4. Done
 msg "==============================" \
     "=============================="
 msg " ✅ 卸载完成！" \
