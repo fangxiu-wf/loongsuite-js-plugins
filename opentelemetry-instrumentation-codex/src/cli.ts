@@ -288,7 +288,16 @@ export async function cmdInstall(opts: {
   let newContent = existing + separator + "\n# OpenTelemetry instrumentation hooks\n" + hooksSection;
 
   if (!newContent.includes("codex_hooks")) {
-    newContent += "\n[features]\ncodex_hooks = true\n";
+    const featuresMatch = newContent.match(/^\[features\]\s*$/m);
+    if (featuresMatch && featuresMatch.index !== undefined) {
+      const insertPos = featuresMatch.index + featuresMatch[0].length;
+      newContent =
+        newContent.slice(0, insertPos) +
+        "\ncodex_hooks = true" +
+        newContent.slice(insertPos);
+    } else {
+      newContent += "\n[features]\ncodex_hooks = true\n";
+    }
   }
 
   fs.writeFileSync(configPath, newContent, "utf-8");
