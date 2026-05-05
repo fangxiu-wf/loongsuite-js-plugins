@@ -58,10 +58,10 @@ msg "==============================================" \
     "=============================================="
 echo ""
 
-# 0. Check if codex CLI is available
-if ! command -v codex &>/dev/null; then
-    msg "⚠️  未检测到 codex CLI（可稍后安装）" \
-        "⚠️  codex CLI not found (can be installed later)"
+# 0. Check if Codex is installed (CLI or Desktop — both create ~/.codex)
+if [ ! -d "$HOME/.codex" ]; then
+    msg "⚠️  未检测到 Codex（~/.codex 目录不存在，可稍后安装）" \
+        "⚠️  Codex not detected (~/.codex not found, can be installed later)"
     echo ""
 fi
 
