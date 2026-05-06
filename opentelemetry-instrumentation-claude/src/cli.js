@@ -189,7 +189,7 @@ function buildHookConfig(entryPath) {
   ];
   const config = {};
   for (const [event, sub] of subcommands) {
-    config[event] = [{ hooks: [{ type: "command", command: `bash ${entryPath} ${sub}` }] }];
+    config[event] = [{ matcher: "*", hooks: [{ type: "command", command: `bash ${entryPath} ${sub}` }] }];
   }
   return config;
 }
