@@ -128,10 +128,10 @@ WRAPPER
 fi
 echo ""
 
-# 3. Register hooks in ~/.codex/config.toml
+# 3. Register hooks in ~/.codex/hooks.json
 msg "==> 正在注册 Codex Hook..." \
     "==> Registering Codex hooks..."
-otel-codex-hook install
+node "$PKG_DIR/bin/otel-codex-hook" install
 echo ""
 
 # 4. Done

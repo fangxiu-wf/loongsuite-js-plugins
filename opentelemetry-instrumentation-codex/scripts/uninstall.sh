@@ -61,18 +61,19 @@ echo ""
 HOOKS_JSON="$HOME/.codex/hooks.json"
 msg "==> 清理 hooks.json ($HOOKS_JSON)..." \
     "==> Cleaning up hooks.json ($HOOKS_JSON)..."
-if [ -f "$HOOKS_JSON" ] && grep -q "otel-codex-hook" "$HOOKS_JSON" 2>/dev/null; then
+if [ -f "$HOOKS_JSON" ] && grep -qE "otel-codex-hook|hook-entry\.sh" "$HOOKS_JSON" 2>/dev/null; then
     if command -v node >/dev/null 2>&1; then
         node -e "
 const fs = require('fs');
 const f = process.argv[1];
+const isOurs = c => c.includes('otel-codex-hook') || c.includes('hook-entry.sh');
 try {
   const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
   if (d && d.hooks) {
     for (const ev of Object.keys(d.hooks)) {
       d.hooks[ev] = d.hooks[ev].filter(g => {
         if (!g.hooks) return true;
-        g.hooks = g.hooks.filter(h => !(h.command && h.command.includes('otel-codex-hook')));
+        g.hooks = g.hooks.filter(h => !(h.command && isOurs(h.command)));
         return g.hooks.length > 0;
       });
       if (d.hooks[ev].length === 0) delete d.hooks[ev];
