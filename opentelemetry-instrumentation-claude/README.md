@@ -1,6 +1,6 @@
 # opentelemetry-instrumentation-claude
 
-为 Claude Code 提供 OpenTelemetry 追踪能力，通过 Hook 机制自动采集 session 级别的 trace，并通过 `intercept.js` 捕获每次 LLM API 调用的 token 用量和消息内容。
+为 Claude Code 提供 OpenTelemetry 追踪能力，通过 Hook 机制自动采集 session 级别的 trace，并通过解析 Claude Code 原生 transcript 或 `intercept.js` HTTP 拦截捕获每次 LLM API 调用的 token 用量和消息内容。
 
 Trace 数据完全遵循 [ARMS GenAI 语义规范](../arms/semantic-conventions/arms_docs/trace/gen-ai.md)，使用 `@loongsuite/opentelemetry-util-genai` SDK 的 `ExtendedTelemetryHandler` 生成标准化 Span。
 
@@ -10,12 +10,15 @@ Trace 数据完全遵循 [ARMS GenAI 语义规范](../arms/semantic-conventions/
 
 - **ARMS 语义规范兼容**：Span 层级遵循 ENTRY → AGENT → STEP → TOOL/LLM 标准结构，属性名、消息格式完全符合 ARMS GenAI Trace 规范
 - **Hook 驱动**：利用 Claude Code 的 `settings.json` hook 机制（`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop` 等），无需修改任何业务代码
-- **LLM 调用级追踪**：`intercept.js` 在进程内拦截 HTTP 请求，记录 Anthropic / OpenAI API 的 token 用量、输入输出消息，写入 JSONL 日志
+- **LLM 调用级追踪**：优先解析 Claude Code 原生 transcript JSONL（兼容所有版本），回退到 `intercept.js` 进程内 HTTP 拦截，记录 Anthropic / OpenAI API 的 token 用量、输入输出消息
+- **Per-turn 独立 Trace**：每轮对话生成独立的 trace（新 traceId），同一 session 的所有 turn 共享 `gen_ai.session.id`
+- **多模态图片支持**：Anthropic、OpenAI Chat、OpenAI Responses 协议的图片内容块自动转换为 `BlobPart`（base64）/ `UriPart`（URL）格式
 - **标准化消息格式**：输入/输出消息自动转换为 ARMS JSON Schema 格式（`InputMessage`、`OutputMessage`、`SystemInstruction`），支持 Anthropic、OpenAI Chat、OpenAI Responses 三种协议
 - **嵌套 Subagent 支持**：完整的父→子 Span 层级，适用于多 Agent 协作场景
 - **语义方言支持**：自动检测 Sunfire 端点，切换 `gen_ai.span_kind_name`（ALIBABA_GROUP）/ `gen_ai.span.kind`（默认）属性名
 - **原子状态写入**：基于 `rename` 的原子文件写入，防止并发 hook 进程读取到半写文件
-- **自动 alias 注入**：安装后 `claude` 命令自动携带 `NODE_OPTIONS=--require intercept.js`，无需手动配置
+- **自动 alias 注入**：安装后 `claude` 命令自动携带 telemetry 环境变量，无需手动配置
+- **Cursor IDE 兼容**：hook 配置包含 `matcher` 字段，自动检测并跳过 Cursor IDE 调用
 - **配置文件支持**：可通过 `~/.claude/otel-config.json` 配置所有 OTLP 参数，优先于环境变量，避免与本地其他 OTel 工具冲突
 - **JSONL 日志采集**：可选的本地日志功能，支持 chain hash 增量校验和每日文件轮转，与 trace 数据关联
 - **纯日志模式（Log-only）**：支持仅输出 JSONL 日志而不上报 OTel Trace，适用于与 ai-agent-collector 等第三方采集工具集成
@@ -232,13 +235,14 @@ claude "帮我写一个 Python hello world"
 安装后，`~/.bashrc` 中会新增一行：
 
 ```bash
-alias claude='CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_METRIC_EXPORT_INTERVAL=20000 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY NODE_OPTIONS="--require $HOME/.cache/opentelemetry.instrumentation.claude/intercept.js" npx -y @anthropic-ai/claude-code@latest'
+alias claude='CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_METRIC_EXPORT_INTERVAL=20000 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta npx -y @anthropic-ai/claude-code@latest'
 ```
 
 这意味着：
-- 每次执行 `claude` 命令，`intercept.js` 会在进程启动时自动加载
-- `intercept.js` 拦截 Anthropic/OpenAI HTTP 请求，记录 token 用量和消息内容
-- 这些数据会在每轮对话结束时（`stop` hook）合并进 OTel trace，每轮生成独立的 trace
+- 每次执行 `claude` 命令，自动携带 telemetry 相关环境变量
+- GenAI SDK 环境变量（`OTEL_SEMCONV_STABILITY_OPT_IN` 等）由 `otel-claude-hook` 入口点自动设置
+- LLM 调用数据优先从 Claude Code 原生 transcript 获取，无需 `intercept.js` HTTP 拦截
+- 每轮对话结束时（`stop` hook）生成独立的 OTel trace
 
 ### 验证安装
 
@@ -320,6 +324,7 @@ STEP = 一次 LLM 推理周期 + 由该推理触发的工具调用（0 或多个
 # 安装管理
 otel-claude-hook install             # 写入 ~/.claude/settings.json hook 配置
 otel-claude-hook install --project   # 写入 ./.claude/settings.json（项目级别）
+otel-claude-hook install --no-alias  # 跳过 shell alias 设置（用于 pilot 等托管安装）
 otel-claude-hook uninstall           # 卸载 hooks、intercept.js 和 claude alias
 otel-claude-hook uninstall --purge   # 卸载并删除整个缓存目录（含 sessions）
 otel-claude-hook uninstall --project # 同时卸载 project-level settings
@@ -356,7 +361,8 @@ opentelemetry-instrumentation-claude/
 │   ├── state.js                     # session 状态文件读写（原子写入）
 │   ├── telemetry.js                 # OTel TracerProvider 配置（OTLP/HTTP + Console）
 │   ├── hooks.js                     # 工具格式化函数 + extractToolResult/extractToolError
-│   └── intercept.js                 # HTTP 拦截器（支持 Node.js + Bun）
+│   ├── transcript.js                # Claude Code 原生 transcript JSONL 解析（优先数据源）
+│   └── intercept.js                 # HTTP 拦截器（回退数据源，支持 Node.js + Bun）
 ├── scripts/
 │   ├── install.sh                   # 源码安装脚本
 │   ├── remote-install.sh            # 远程一键安装脚本
@@ -367,6 +373,7 @@ opentelemetry-instrumentation-claude/
     ├── config.test.js               # 配置文件加载、优先级、缺失文件兜底测试
     ├── logger.test.js               # JSONL 日志、chain hash、文件轮转测试
     ├── message-converter.test.js    # 消息格式转换测试（3 协议 × 多场景）
+    ├── transcript.test.js           # transcript JSONL 解析测试
     ├── hooks.test.js                # hooks 工具函数测试
     ├── state.test.js                # 状态文件读写测试
     ├── intercept.test.js            # HTTP 拦截器测试
@@ -387,23 +394,21 @@ opentelemetry-instrumentation-claude/
    ```
    写入采用 `rename` 原子操作，防止并发 hook 进程读到半写文件。
 
-3. **intercept.js**：通过 `NODE_OPTIONS=--require` 在 Claude Code 进程启动时注入。自动选择最优拦截策略：
-   - **Node.js + undici 可用** → undici Dispatcher 拦截（最底层，最可靠）
-   - **https.request patch** → 适用于 bundled claude binary
-   - **Node.js 无 undici** → monkey-patch `globalThis.fetch`
-   - **Bun 运行时** → monkey-patch `globalThis.fetch`
+3. **Transcript 解析**（优先）：`transcript.js` 解析 Claude Code 原生 session transcript（`~/.claude/projects/<hash>/<session-id>.jsonl`），提取每次 LLM 调用的模型、token 用量、输入输出消息。支持流式分块合并和去重。不依赖 HTTP 拦截，兼容所有 Claude Code 版本。
 
-   拦截到的 LLM 调用写入 JSONL 文件：
-   ```
-   ~/.cache/opentelemetry.instrumentation.claude/sessions/proxy_events_<pid>.jsonl
-   ```
+4. **intercept.js**（回退）：当 transcript 不可用时，通过 `NODE_OPTIONS=--require` 注入 HTTP 拦截。自动选择最优策略：
+   - **Node.js + undici** → undici Dispatcher 拦截
+   - **https.request patch** → 适用于 bundled binary
+   - **globalThis.fetch patch** → Bun 运行时
 
-4. **消息格式转换**：`message-converter.js` 将 intercept.js 捕获的原始 LLM 请求/响应数据转换为 ARMS 语义规范格式：
+   拦截到的 LLM 调用写入：`~/.cache/opentelemetry.instrumentation.claude/sessions/proxy_events_<pid>.jsonl`
+
+5. **消息格式转换**：`message-converter.js` 将 LLM 请求/响应数据转换为 ARMS 语义规范格式：
    - Anthropic API（`content blocks`）→ `InputMessage` / `OutputMessage`
    - OpenAI Chat API（`tool_calls` / `role:tool`）→ `InputMessage` / `OutputMessage`
    - OpenAI Responses API（`function_call_output`）→ `InputMessage` / `OutputMessage`
 
-5. **trace 导出**：`stop` hook 在每轮对话结束时触发，`exportSessionTrace` 通过 `ExtendedTelemetryHandler` SDK 构建标准化 Span 树：
+6. **trace 导出**：`stop` hook 在每轮对话结束时触发，`exportSessionTrace` 通过 `ExtendedTelemetryHandler` SDK 构建标准化 Span 树：
    - 按 `user_prompt_submit` 事件将累积事件拆分为独立 turn
    - 每个 turn 创建独立的 ENTRY → AGENT Span 层级（新 traceId），共享 `gen_ai.session.id`
    - 每次 `llm_call` 事件开启新的 STEP Span，后续 TOOL Span 挂在该 STEP 下
@@ -411,7 +416,7 @@ opentelemetry-instrumentation-claude/
    - 导出成功后清空已导出事件，避免下轮重复导出
    - 执行 `forceFlush` + `shutdown` 确保数据发送完毕
 
-6. **JSONL 日志采集**（可选）：当 `log_enabled=true` 时，`logger.js` 在 trace 导出完成后将每轮对话的详细记录写入本地 JSONL 文件：
+7. **JSONL 日志采集**（可选）：当 `log_enabled=true` 时，`logger.js` 在 trace 导出完成后将每轮对话的详细记录写入本地 JSONL 文件：
    - 文件路径：`<log_dir>/claude-code.jsonl.YYYYMMDD`，按天自动轮转
    - 每条记录遵循 AI Agent EventSchema（event_t）规范：`event.name` 区分事件类型（`llm.request`/`llm.response`/`tool.call`/`tool.result`），包含 `event.id`、`session.id`、`turn.id`、`step.id`、`message.role`、`user.id`、`agent.type` 等标准字段
    - LLM 请求和响应拆分为独立事件：`llm.request` 携带 `input.messages_delta`/`input.messages_hash`，`llm.response` 携带 `output.messages`/`usage.*` token 用量
