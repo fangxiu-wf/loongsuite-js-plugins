@@ -15,6 +15,14 @@ on:
         required: true
         default: true
         type: boolean
+      oss_bucket:
+        description: "OSS bucket name"
+        required: true
+        default: "arms-apm-cn-hangzhou-pre"
+      oss_endpoint:
+        description: "OSS endpoint"
+        required: true
+        default: "oss-cn-hangzhou.aliyuncs.com"
       dry_run:
         description: "Build/package only, skip OSS upload and GitHub release"
         required: true
@@ -32,8 +40,8 @@ jobs:
       PLUGIN_DIR: opentelemetry-instrumentation-openclaw
       PLUGIN_NAME: opentelemetry-instrumentation-openclaw
       TAG_PREFIX: opentelemetry-instrumentation-openclaw/v
-      OSS_BUCKET: arms-apm-cn-hangzhou-pre
-      OSS_ENDPOINT: oss-cn-hangzhou.aliyuncs.com
+      OSS_BUCKET: ${{ github.event.inputs.oss_bucket }}
+      OSS_ENDPOINT: ${{ github.event.inputs.oss_endpoint }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
