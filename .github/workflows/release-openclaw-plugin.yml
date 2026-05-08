@@ -52,6 +52,14 @@ jobs:
         working-directory: ${{ env.PLUGIN_DIR }}
         run: npm test
 
+      - name: Check package-lock.json for internal registry URLs
+        working-directory: ${{ env.PLUGIN_DIR }}
+        run: |
+          if grep -q "registry.anpm.alibaba-inc.com" package-lock.json; then
+            echo "::error::package-lock.json contains internal registry URLs (registry.anpm.alibaba-inc.com). Regenerate with: rm -rf node_modules package-lock.json && npm install"
+            exit 1
+          fi
+
       - name: Validate release version
         id: validate_version
         run: |
