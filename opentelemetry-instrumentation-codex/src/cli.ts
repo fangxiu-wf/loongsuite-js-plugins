@@ -17,6 +17,7 @@ import {
 import { parseTranscript } from "./transcript.js";
 import { isLogEnabled, writeLogRecords } from "./logger.js";
 import { generateTurnLogRecords } from "./log-records.js";
+import { writeTrustedHashes, removeTrustBlock } from "./trust.js";
 
 // --- stdin reading ---
 
@@ -333,6 +334,14 @@ function ensureCodexHooksFeature(configPath: string): void {
   fs.writeFileSync(configPath, content, "utf-8");
 }
 
+function isLegacyHookLine(line: string): boolean {
+  return (
+    line.includes("otel-codex-hook") &&
+    !line.includes("# BEGIN otel-codex-hook trust") &&
+    !line.includes("# END otel-codex-hook trust")
+  );
+}
+
 function removeLegacyTomlHooks(configPath: string): void {
   if (!fs.existsSync(configPath)) return;
   let content = fs.readFileSync(configPath, "utf-8");
@@ -357,13 +366,13 @@ function removeLegacyTomlHooks(configPath: string): void {
     } else {
       content = content
         .split("\n")
-        .filter((l) => !l.includes("otel-codex-hook"))
+        .filter((l) => !isLegacyHookLine(l))
         .join("\n");
     }
   } else {
     content = content
       .split("\n")
-      .filter((l) => !l.includes("otel-codex-hook"))
+      .filter((l) => !isLegacyHookLine(l))
       .join("\n");
   }
 
@@ -421,8 +430,21 @@ export async function cmdInstall(opts: {
     `[otel-codex-hook] Hooks written to ${hooksJsonPath}\n`,
   );
 
-  ensureCodexHooksFeature(configPath);
+  // Clean up legacy TOML hooks before writing new trust state
   removeLegacyTomlHooks(configPath);
+  ensureCodexHooksFeature(configPath);
+
+  const absHooksJsonPath = path.resolve(hooksJsonPath);
+  writeTrustedHashes(
+    configPath,
+    absHooksJsonPath,
+    entryPath,
+    HOOK_EVENTS,
+    EVENT_TO_SUBCOMMAND,
+  );
+  process.stderr.write(
+    `[otel-codex-hook] Trusted hashes written to ${configPath}\n`,
+  );
 
   process.stderr.write("[otel-codex-hook] Hooks installed successfully.\n");
 }
@@ -505,13 +527,13 @@ export function cmdUninstall(opts: {
       } else {
         // end marker not found — fallback: remove lines containing otel-codex-hook
         const lines = content.split("\n");
-        content = lines.filter((l) => !l.includes("otel-codex-hook")).join("\n");
+        content = lines.filter((l) => !isLegacyHookLine(l)).join("\n");
       }
       changed = true;
     } else {
       // no marker comment — fallback: remove lines containing otel-codex-hook
       const lines = content.split("\n");
-      const filtered = lines.filter((l) => !l.includes("otel-codex-hook"));
+      const filtered = lines.filter((l) => !isLegacyHookLine(l));
       if (filtered.length !== lines.length) {
         content = filtered.join("\n");
         changed = true;
@@ -552,6 +574,11 @@ export function cmdUninstall(opts: {
     } else {
       process.stderr.write("[otel-codex-hook] No hooks found to remove.\n");
     }
+  }
+
+  // Remove trusted_hash entries
+  if (removeTrustBlock(configPath)) {
+    process.stderr.write("[otel-codex-hook] Trust hashes removed from config.toml.\n");
   }
 
   if (opts.purge) {
