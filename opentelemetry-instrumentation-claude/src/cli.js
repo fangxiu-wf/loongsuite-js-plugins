@@ -164,6 +164,9 @@ function generateHookEntry() {
     "  exit 0",
     "fi",
     "",
+    "# Prevent legacy NODE_OPTIONS --require intercept.js from breaking hook subprocesses",
+    "unset NODE_OPTIONS 2>/dev/null || true",
+    "",
     `exec "$NODE_BIN" ${JSON.stringify(binPath)} "$@"`,
     "",
   ].join("\n");
@@ -373,6 +376,32 @@ function splitEventsByTurn(events) {
   }
 
   return turns;
+}
+
+function enrichChildStateWithTranscript(childState) {
+  if (!childState || childState._transcript_enriched) return;
+  childState._transcript_enriched = true;
+
+  if (!childState.transcript_path || !Array.isArray(childState.events)) return;
+
+  try {
+    const { parseClaudeTranscript, alignWithHookEvents } = require("./transcript");
+    const startTime = childState.start_time || 0;
+    const stopTime = childState.stop_time || Date.now() / 1000;
+    const llmEvents = parseClaudeTranscript(childState.transcript_path, startTime, stopTime);
+    if (llmEvents.length > 0) {
+      alignWithHookEvents(llmEvents, childState.events, stopTime);
+      const getSortKey = (e) => {
+        if (e.type === "llm_call" && e.request_start_time) return e.request_start_time;
+        return e.timestamp || 0;
+      };
+      childState.events = [...childState.events, ...llmEvents].sort(
+        (a, b) => getSortKey(a) - getSortKey(b)
+      );
+    }
+  } catch (err) {
+    debug(`subagent transcript parse failed: ${err?.message || String(err)}`);
+  }
 }
 
 function replayEventsAsSpans(handler, tracer, events, parentCtx, stopTime, sessionId) {
@@ -681,12 +710,16 @@ function replayEventsAsSpans(handler, tracer, events, parentCtx, stopTime, sessi
           entry.agentInv.usageCacheCreationInputTokens = ev.cache_creation_input_tokens || 0;
           entry.agentInv.finishReasons = [ev.stop_reason || "end_turn"];
           if (childState) {
+            enrichChildStateWithTranscript(childState);
             entry.childState = childState;
             if (childState.model) entry.agentInv.requestModel = childState.model;
           }
         }
       }
       // Fallback: orphan subagent_stop with child_state
+      if (childState && !childState._transcript_enriched) {
+        enrichChildStateWithTranscript(childState);
+      }
       if (subagentSpanStack.length === 0 && !Object.keys(openSubagentsByAgentId).length &&
           childState && Array.isArray(childState.events) && childState.events.length > 0) {
         const childStart = childState.start_time || evTs;
@@ -818,10 +851,16 @@ function generateTurnLogRecords(turn, turnIndex, sessionId, model, prevHash, tra
       const protocol = ev.protocol || "anthropic";
 
       const inputMsgs = convertInputMessages(ev.input_messages, protocol);
-      const currentFullHash = computeHash(INITIAL_HASH, inputMsgs);
-
-      const delta = inputMsgs.slice(prevInputMsgs.length);
-      const logFull = shouldLogFullMessages(runningHash, delta, currentFullHash);
+      let currentFullHash, delta, logFull;
+      if (ev._input_is_delta) {
+        delta = inputMsgs;
+        currentFullHash = computeHash(runningHash, delta);
+        logFull = false;
+      } else {
+        currentFullHash = computeHash(INITIAL_HASH, inputMsgs);
+        delta = inputMsgs.slice(prevInputMsgs.length);
+        logFull = shouldLogFullMessages(runningHash, delta, currentFullHash);
+      }
 
       const requestRecord = {
         time_unix_nano: Math.round((ev.request_start_time || evTs) * 1e9),
@@ -876,7 +915,7 @@ function generateTurnLogRecords(turn, turnIndex, sessionId, model, prevHash, tra
 
       records.push(responseRecord);
       runningHash = currentFullHash;
-      prevInputMsgs = inputMsgs;
+      prevInputMsgs = ev._input_is_delta ? [] : inputMsgs;
 
     } else if (ev.type === "post_tool_use") {
       const toolName = ev.tool_name || "unknown";
@@ -970,19 +1009,38 @@ async function exportSessionTrace(state, stopReason = "end_turn") {
   const startTime = typeof state.start_time === "number" ? state.start_time : Date.now() / 1000;
   const stopTime = typeof state.stop_time === "number" ? state.stop_time : Date.now() / 1000;
 
-  // Merge proxy events from intercept.js
+  // Merge LLM call data from transcript (primary) or proxy events (fallback)
   let allEvents = Array.isArray(state.events) ? [...state.events] : [];
-  try {
-    const claudePid = resolveClaudePid();
-    const proxyEvents = readProxyEvents(startTime, stopTime, true, claudePid);
-    if (proxyEvents.length > 0) {
-      const getSortKey = (e) => {
-        if (e.type === "llm_call" && e.request_start_time) return e.request_start_time;
-        return e.timestamp || 0;
-      };
-      allEvents = [...allEvents, ...proxyEvents].sort((a, b) => getSortKey(a) - getSortKey(b));
+  let llmEvents = [];
+
+  // Primary: parse Claude Code transcript
+  if (state.transcript_path) {
+    try {
+      const { parseClaudeTranscript, alignWithHookEvents } = require("./transcript");
+      llmEvents = parseClaudeTranscript(state.transcript_path, startTime, stopTime);
+      if (llmEvents.length > 0) {
+        alignWithHookEvents(llmEvents, allEvents, stopTime);
+      }
+    } catch (err) {
+      debug(`transcript parse failed: ${err?.message || String(err)}`);
     }
-  } catch {}
+  }
+
+  // Fallback: intercept.js proxy events (for older Claude Code versions)
+  if (llmEvents.length === 0) {
+    try {
+      const claudePid = resolveClaudePid();
+      llmEvents = readProxyEvents(startTime, stopTime, true, claudePid);
+    } catch {}
+  }
+
+  if (llmEvents.length > 0) {
+    const getSortKey = (e) => {
+      if (e.type === "llm_call" && e.request_start_time) return e.request_start_time;
+      return e.timestamp || 0;
+    };
+    allEvents = [...allEvents, ...llmEvents].sort((a, b) => getSortKey(a) - getSortKey(b));
+  }
 
   // Split into per-turn groups
   const turns = splitEventsByTurn(allEvents);
@@ -1204,6 +1262,12 @@ function installIntoSettings(settingsPath, entryPath) {
 // Command handlers (called from bin/otel-claude-hook)
 // ---------------------------------------------------------------------------
 
+function maybeSaveTranscriptPath(state, event) {
+  if (!state.transcript_path && event.transcript_path) {
+    state.transcript_path = event.transcript_path;
+  }
+}
+
 function cmdUserPromptSubmit() {
   const event = readStdinJson();
   if (isCursorCaller(event)) return;
@@ -1211,6 +1275,7 @@ function cmdUserPromptSubmit() {
   const prompt = event.prompt || "";
 
   const state = loadState(sessionId);
+  maybeSaveTranscriptPath(state, event);
   if (!state.start_time) state.start_time = Date.now() / 1000;
   if (!state.prompt) state.prompt = prompt;
   state.metrics.turns = (state.metrics.turns || 0) + 1;
@@ -1237,6 +1302,7 @@ function cmdPreToolUse() {
   const toolUseId = event.tool_use_id || null;
 
   const state = loadState(sessionId);
+  maybeSaveTranscriptPath(state, event);
   state.metrics.tools_used = (state.metrics.tools_used || 0) + 1;
   if (!state.tools_used.includes(toolName)) state.tools_used.push(toolName);
 
@@ -1256,6 +1322,7 @@ function cmdPostToolUse() {
   const sessionId = event.session_id || require("crypto").randomUUID();
 
   const state = loadState(sessionId);
+  maybeSaveTranscriptPath(state, event);
   const toolName = event.tool_name || "unknown";
   state.events.push({
     type: "post_tool_use",
@@ -1273,6 +1340,7 @@ function cmdPreCompact() {
   const sessionId = event.session_id || require("crypto").randomUUID();
 
   const state = loadState(sessionId);
+  maybeSaveTranscriptPath(state, event);
   state.events.push({
     type: "pre_compact",
     timestamp: Date.now() / 1000,
@@ -1288,6 +1356,7 @@ function cmdSubagentStart() {
   const sessionId = event.session_id || require("crypto").randomUUID();
 
   const state = loadState(sessionId);
+  maybeSaveTranscriptPath(state, event);
   state.events.push({
     type: "subagent_start",
     timestamp: Date.now() / 1000,
@@ -1310,6 +1379,9 @@ function cmdSubagentStop() {
   const cacheRead = usage.cache_read_input_tokens || event.cache_read_input_tokens || 0;
   const cacheCreate = usage.cache_creation_input_tokens || event.cache_creation_input_tokens || 0;
 
+  const state = loadState(sessionId);
+  maybeSaveTranscriptPath(state, event);
+
   const childSid = event.subagent_session_id || "unknown";
   let childStateSnapshot = null;
   if (childSid && childSid !== "unknown" && childSid !== sessionId) {
@@ -1330,7 +1402,6 @@ function cmdSubagentStop() {
     evData._child_state = childStateSnapshot;
   }
 
-  const state = loadState(sessionId);
   state.events.push(evData);
   saveState(sessionId, state);
 }
@@ -1341,6 +1412,7 @@ function cmdNotification() {
   const sessionId = event.session_id || require("crypto").randomUUID();
 
   const state = loadState(sessionId);
+  maybeSaveTranscriptPath(state, event);
   state.events.push({
     type: "notification",
     timestamp: Date.now() / 1000,
@@ -1358,6 +1430,7 @@ async function cmdStop() {
   const stopReason = event.stop_reason || "end_turn";
 
   const state = loadState(sessionId);
+  maybeSaveTranscriptPath(state, event);
   state.stop_time = Date.now() / 1000;
   saveState(sessionId, state);
 
@@ -1409,15 +1482,8 @@ async function cmdInstall(opts = {}) {
       installIntoSettings(settingsPath, entryPath);
       log(installMsg(`✅ Hook 已安装到 ${settingsPath}`, `✅ Hooks installed in ${settingsPath}`));
     }
-    log(installMsg(
-      "✅ 已启用 Claude Code 内置 OTel 指标 (CLAUDE_CODE_ENABLE_TELEMETRY=1 via alias)",
-      "✅ Claude Code built-in OTel metrics enabled (CLAUDE_CODE_ENABLE_TELEMETRY=1 via alias)"
-    ));
 
-    // 2. Copy intercept.js to cache directory
-    const interceptPath = installIntercept();
-
-    // 3. Set up shell alias via setup-alias.sh (if bash is available)
+    // 2. Set up shell alias via setup-alias.sh (if bash is available)
     const setupAliasScript = path.join(__dirname, "..", "scripts", "setup-alias.sh");
     if (fs.existsSync(setupAliasScript)) {
       try {
@@ -1433,31 +1499,19 @@ async function cmdInstall(opts = {}) {
       }
     }
 
-    // 4. Print usage hints (non-quiet only)
+    // 3. Print usage hints (non-quiet only)
     log(
       installMsg(
         "\n请配置遥测后端：\n" +
         "  export OTEL_EXPORTER_OTLP_ENDPOINT='https://xxx:4318'\n" +
-        "  export OTEL_RESOURCE_ATTRIBUTES='service.name=claude-agents'\n",
+        "  export OTEL_RESOURCE_ATTRIBUTES='service.name=claude-agents'\n" +
+        "\nLLM 追踪数据通过 Claude Code 的 transcript 文件自动获取，无需额外配置。\n",
         "\nRemember to configure your telemetry backend:\n" +
         "  export OTEL_EXPORTER_OTLP_ENDPOINT='https://xxx:4318'\n" +
-        "  export OTEL_RESOURCE_ATTRIBUTES='service.name=claude-agents'\n"
+        "  export OTEL_RESOURCE_ATTRIBUTES='service.name=claude-agents'\n" +
+        "\nLLM trace data is automatically obtained from Claude Code's transcript files — no additional setup required.\n"
       )
     );
-    if (interceptPath) {
-      log(
-        installMsg(
-          "启用 LLM 输入输出追踪，请使用以下方式启动 Claude Code：\n" +
-          `  CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_METRIC_EXPORT_INTERVAL=20000 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY NODE_OPTIONS="--require ${interceptPath}" npx -y @anthropic-ai/claude-code@latest\n` +
-          "\n或在 Shell 配置文件中添加以下别名（已通过 setup-alias.sh 自动配置）：\n" +
-          `  alias claude='CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_METRIC_EXPORT_INTERVAL=20000 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY NODE_OPTIONS="--require ${interceptPath}" npx -y @anthropic-ai/claude-code@latest'\n`,
-          "To enable LLM call tracing, launch Claude Code with:\n" +
-          `  CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_METRIC_EXPORT_INTERVAL=20000 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY NODE_OPTIONS="--require ${interceptPath}" npx -y @anthropic-ai/claude-code@latest\n` +
-          "\nOr add the following alias to your shell profile (auto-configured via setup-alias.sh):\n" +
-          `  alias claude='CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_METRIC_EXPORT_INTERVAL=20000 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY NODE_OPTIONS="--require ${interceptPath}" npx -y @anthropic-ai/claude-code@latest'\n`
-        )
-      );
-    }
   } catch (err) {
     if (quiet) {
       // In quiet/postinstall mode: warn but don't fail npm install
@@ -1558,7 +1612,7 @@ function cmdUninstall(opts = {}) {
   for (const t of targets) uninstallFromSettings(t);
   console.error("");
 
-  // 2. Remove intercept.js (or entire cache dir if --purge)
+  // 2. Clean cache directory (intercept.js + session state)
   const cacheDir = path.join(os.homedir(), ".cache", "opentelemetry.instrumentation.claude");
   if (opts.purge) {
     console.error(msg("==> --purge: 正在删除整个缓存目录...", "==> --purge: Removing entire cache directory..."));
@@ -1569,13 +1623,10 @@ function cmdUninstall(opts = {}) {
       console.error(msg(`    ℹ️  ${cacheDir} 不存在，跳过`, `    ℹ️  ${cacheDir} not found, skipping`));
     }
   } else {
-    console.error(msg("==> 正在删除 intercept.js...", "==> Removing intercept.js..."));
+    // Clean up legacy intercept.js if present
     const interceptFile = path.join(cacheDir, "intercept.js");
     if (fs.existsSync(interceptFile)) {
-      fs.unlinkSync(interceptFile);
-      console.error(msg(`    ✅ 已删除 ${interceptFile}`, `    ✅ Deleted ${interceptFile}`));
-    } else {
-      console.error(msg(`    ℹ️  ${interceptFile} 不存在，跳过`, `    ℹ️  ${interceptFile} not found, skipping`));
+      try { fs.unlinkSync(interceptFile); } catch {}
     }
   }
   console.error("");
@@ -1672,6 +1723,7 @@ module.exports = {
   _generateTurnLogRecords: generateTurnLogRecords,
   _installIntercept: installIntercept,
   _removeAliasFromFile: removeAliasFromFile,
+  _maybeSaveTranscriptPath: maybeSaveTranscriptPath,
   _cmdSubagentStartWithEvent: function(event) {
     const sessionId = event.session_id || require("crypto").randomUUID();
     const state = loadState(sessionId);

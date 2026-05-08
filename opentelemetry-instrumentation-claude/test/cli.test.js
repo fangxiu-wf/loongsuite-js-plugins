@@ -31,6 +31,7 @@ jest.mock("../src/state", () => {
         try { return JSON.parse(fs2.readFileSync(sf, "utf-8")); } catch {}
       }
       return { session_id: sid, start_time: Date.now() / 1000, prompt: "", model: "unknown",
+               transcript_path: null,
                metrics: { input_tokens: 0, output_tokens: 0, tools_used: 0, turns: 0 },
                tools_used: [], events: [] };
     },
@@ -1169,5 +1170,107 @@ describe("generateTurnLogRecords", () => {
     expect(resultRec["is_error"]).toBe(true);
     expect(resultRec["error.message"]).toContain("Permission denied");
     expect(resultRec["tool.result.duration_ms"]).toBe(1000);
+  });
+});
+
+// ─── maybeSaveTranscriptPath ────────────────────────────────────────────────
+describe("maybeSaveTranscriptPath", () => {
+  test("sets transcript_path when state has none and event has one", () => {
+    const state = { transcript_path: null };
+    const event = { transcript_path: "/path/to/transcript.jsonl" };
+    cli._maybeSaveTranscriptPath(state, event);
+    expect(state.transcript_path).toBe("/path/to/transcript.jsonl");
+  });
+
+  test("does not overwrite existing transcript_path", () => {
+    const state = { transcript_path: "/existing/path.jsonl" };
+    const event = { transcript_path: "/new/path.jsonl" };
+    cli._maybeSaveTranscriptPath(state, event);
+    expect(state.transcript_path).toBe("/existing/path.jsonl");
+  });
+
+  test("no-op when event has no transcript_path", () => {
+    const state = { transcript_path: null };
+    const event = { session_id: "test" };
+    cli._maybeSaveTranscriptPath(state, event);
+    expect(state.transcript_path).toBeNull();
+  });
+});
+
+// ─── exportSessionTrace transcript integration ──────────────────────────────
+describe("exportSessionTrace with transcript", () => {
+  test("uses transcript when state has transcript_path", async () => {
+    const sessionId = "transcript-export-" + Date.now();
+    const state = stateModule.loadState(sessionId);
+    state.start_time = 1000;
+    state.prompt = "test prompt";
+    state.model = "claude-opus-4-6";
+    state.transcript_path = path.join(TMP_STATE, "fake-transcript.jsonl");
+
+    // Write a minimal transcript file
+    const records = [
+      { type: "user", message: { content: "hello" } },
+      {
+        type: "assistant",
+        message: {
+          id: "msg_t1",
+          model: "claude-opus-4-6",
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+          content: [{ type: "text", text: "Hi there!" }],
+        },
+      },
+    ];
+    fs.writeFileSync(state.transcript_path, records.map(r => JSON.stringify(r)).join("\n") + "\n", "utf-8");
+
+    state.events = [
+      { type: "user_prompt_submit", timestamp: 1000, prompt: "hello" },
+    ];
+    stateModule.saveState(sessionId, state);
+
+    await cli._exportSessionTrace(state, "end_turn");
+
+    // Verify the SDK handler was called (entry + llm spans)
+    expect(mockHandlerInstance.startEntry).toHaveBeenCalled();
+    expect(mockHandlerInstance.startLlm).toHaveBeenCalled();
+
+    stateModule.clearState(sessionId);
+    try { fs.unlinkSync(state.transcript_path); } catch {}
+  });
+
+  test("does not crash when transcript parse fails", async () => {
+    const sessionId = "transcript-error-" + Date.now();
+    const state = stateModule.loadState(sessionId);
+    state.start_time = 1000;
+    state.prompt = "test";
+    state.model = "test-model";
+    state.transcript_path = "/nonexistent/path/transcript.jsonl";
+    state.events = [
+      { type: "user_prompt_submit", timestamp: 1000, prompt: "test" },
+    ];
+    stateModule.saveState(sessionId, state);
+
+    // Should not throw
+    await expect(cli._exportSessionTrace(state, "end_turn")).resolves.not.toThrow();
+
+    stateModule.clearState(sessionId);
+  });
+
+  test("falls back gracefully when no transcript_path", async () => {
+    const sessionId = "no-transcript-" + Date.now();
+    const state = stateModule.loadState(sessionId);
+    state.start_time = 1000;
+    state.prompt = "test";
+    state.model = "test-model";
+    state.transcript_path = null;
+    state.events = [
+      { type: "user_prompt_submit", timestamp: 1000, prompt: "test" },
+    ];
+    stateModule.saveState(sessionId, state);
+
+    await expect(cli._exportSessionTrace(state, "end_turn")).resolves.not.toThrow();
+    expect(mockHandlerInstance.startEntry).toHaveBeenCalled();
+
+    stateModule.clearState(sessionId);
   });
 });

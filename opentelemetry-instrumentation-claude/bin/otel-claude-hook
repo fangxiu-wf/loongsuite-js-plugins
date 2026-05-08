@@ -4,6 +4,14 @@
 
 "use strict";
 
+// Ensure GenAI SDK defaults — must run before any SDK module is loaded
+if (!process.env.OTEL_SEMCONV_STABILITY_OPT_IN) {
+  process.env.OTEL_SEMCONV_STABILITY_OPT_IN = "gen_ai_latest_experimental";
+}
+if (!process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT) {
+  process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = "SPAN_ONLY";
+}
+
 /**
  * otel-claude-hook — CLI entry point.
  *
