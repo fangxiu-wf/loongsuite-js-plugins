@@ -74,7 +74,7 @@ curl -fsSL https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentel
   --service-name "my-codex-agent"
 ```
 
-The script installs hooks into `~/.codex/config.toml` and registers `otel-codex-hook` on PATH. Traces appear in your backend automatically. The event log looks like:
+The script registers 5 lifecycle hooks (`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`) into `~/.codex/hooks.json`, computes per-hook `trusted_hash` values into `~/.codex/config.toml [hooks.state]` (required by Codex >= 2026-04-22 stable hooks), and generates a Node.js wrapper at `~/.cache/opentelemetry.instrumentation.codex/hook-entry.sh`. Traces appear in your backend automatically. The event log looks like:
 
 ```
 📦 Codex Session: "Fix the login bug..."
@@ -86,6 +86,16 @@ The script installs hooks into `~/.codex/config.toml` and registers `otel-codex-
 │       └── output_tokens: 512
 └── 🛑 stop
 ```
+
+**Out-of-the-box captures (per ARMS GenAI semantic conventions):**
+
+| Attribute | Where | Notes |
+|---|---|---|
+| `gen_ai.input.messages` / `gen_ai.output.messages` | every LLM, AGENT, ENTRY span | content capture defaulted to `SPAN_ONLY`; opt-out via env |
+| `gen_ai.system_instructions` | AGENT + every LLM span | Codex `base_instructions` + per-turn `developer_instructions` |
+| `gen_ai.tool.definitions` | AGENT + every LLM span | Codex `dynamic_tools` (e.g. `automation_update`) — built-in pseudo-tools like `shell` / `apply_patch` are described inline in the system prompt and have no structured definition |
+| `gen_ai.usage.{input,output,cache_read}_tokens` | LLM (per-call) + AGENT (turn total) | parsed from Codex transcript `token_count` events |
+| `gen_ai.agent.system=codex` | resource (every span) | identifies the agent runtime |
 
 📖 [Full documentation → opentelemetry-instrumentation-codex](./opentelemetry-instrumentation-codex/README.md)
 
@@ -198,8 +208,14 @@ chore:    build / toolchain
 
 | Variable | Description |
 |----------|-------------|
+| `CODEX_TELEMETRY_DEBUG` | Set to `1` for verbose stderr + console span output (no backend needed). Note: `CODEX_`, not `CLAUDE_` |
+| `OTEL_CODEX_LOG_ENABLED` | Set to `1` to write JSONL logs (default: `false`; for ai-agent-collector / loongsuite-pilot integration) |
+| `OTEL_CODEX_LOG_DIR` | JSONL output directory (default empty → fallback to `~/.cache/opentelemetry.instrumentation.codex/sessions`) |
+| `OTEL_CODEX_LOG_FILENAME_FORMAT` | `hook` → `codex-YYYY-MM-DD.jsonl` (default); other value → `codex.jsonl.YYYYMMDD` |
 | `OTEL_CODEX_LANG` | Force language: `zh` or `en` (default: auto-detect) |
 | `OTEL_CODEX_TARBALL_URL` | Override tarball download URL for remote install |
+
+**Content capture** (LLM messages / system instructions / tool definitions): the plugin auto-injects `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` + `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY` at hook startup, so message/system/tool content lands on spans by default. To opt out, explicitly set `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT` (the latter is read at runtime — `??=` style injection respects user override).
 
 ---
 
