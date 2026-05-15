@@ -16,7 +16,7 @@ specs/
 └── 2xx-xxx/                           # 其他类型(预留)
 ```
 
-**关于 state.json**:它是单文件权威。verification 各 gate 结果(typecheck/build/unit/e2e/arms)+ PR 元数据(url/number/state/commit/head/base)都嵌入 `state.json`,无需独立的 `verification.json` / `pr.json`(早期模板曾要求这两个文件,首例实施[`100-instrumentation-qodercli`](100-instrumentation-qodercli/)证明分文件冗余且易不一致;已合并到 state.json)。完整 schema 见 [`auto-dev/skills/shared/state-machine.md`](https://gitlab.alibaba-inc.com/fangxiu/auto-dev/-/blob/main/skills/shared/state-machine.md)。
+**关于 state.json**:它是单文件权威。verification 各 gate 结果(typecheck/build/unit/e2e/arms)+ PR 元数据(url/number/state/commit/head/base)都嵌入 `state.json`,无需独立的 `verification.json` / `pr.json`(早期模板曾要求这两个文件,首例实施 [`100-instrumentation-qodercli`](100-instrumentation-qodercli/) 证明分文件冗余且易不一致;已合并到 state.json)。完整 schema 由配套工具仓库的 skill 维护(本仓库不强依赖,任何 spec-kit 兼容工具均可消费这些文件)。
 
 `<AGENT>` 用目标 agent 短名:`gemini` / `aider` / 等。
 
@@ -24,17 +24,13 @@ specs/
 
 ## 工作流
 
-由 `auto-dev-otel-plugin` skill 驱动(参见 `auto-dev/skills/auto-dev-otel-plugin/SKILL.md`)。用户输入:
-```
-/auto-dev-otel-plugin <开发背景描述>
-```
+模板按 spec-kit 标准组织,可由两类工作流驱动:
 
-skill 会:
-1. 分配新编号,创建 `specs/1xx-instrumentation-<agent>/` 目录
-2. 读 `.specify/templates/otel-plugin/spec-template.md` 模板
-3. 询问必填字段(目标 agent / hook 机制 / ARMS endpoint 等)
-4. 产出 `spec.md` 让用户 review
-5. review 通过后,自驱动完成 plan / tasks / implement / verify / PR
+**工作流 A(推荐)— 配套 skill 自驱动**:配套工具仓库提供一个 Claude Code skill(命名 `auto-dev-otel-plugin`),用户输入开发背景后 skill 自动 elicit + plan + implement + verify + push。
+
+**工作流 B — 手工跑模板**:不依赖任何 skill,任何开发者(含 cursor IDE / 手工写代码)都可以直接读 `.specify/templates/otel-plugin/` 下的模板按字段填空,产出 `specs/1xx-instrumentation-<agent>/spec.md`,然后按 `tasks-template.md` 列出的 30 步执行实现 + 验证。
+
+两种工作流产出的 `specs/<id>/` 目录结构一致(spec.md / plan.md / tasks.md / decisions.md / state.json)。无论哪种,都需要在 review 阶段对齐 `.specify/memory/constitution.md` 的 10 条硬约束。
 
 ## 模板与宪法
 

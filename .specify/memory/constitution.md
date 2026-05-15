@@ -9,17 +9,71 @@
 
 ---
 
-## C1. 必须遵循 ARMS GenAI semconv
+## C1. 必须遵循 OTel GenAI semconv(含 LoongSuite 扩展)
 
-每个插件产出的 trace 必须遵循 [ARMS GenAI 语义规范](../../../arms/semantic-conventions/arms_docs/trace/gen-ai.md):
+参考规范:
+- 公开标准:[OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+- LoongSuite 扩展:[loongsuite-semantic-conventions-genai](https://github.com/alibaba/loongsuite-semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md)(在 OTel 标准基础上加入 ENTRY / STEP 等 agent 场景需要的扩展 span 类型)
 
-- `gen_ai.span.kind` 取值:`ENTRY` / `AGENT` / `STEP` / `LLM` / `TOOL`
-- `gen_ai.operation.name` 取值:`enter` / `invoke_agent` / `react` / `chat` / `execute_tool`
-- LLM span 必须含 `gen_ai.usage.{input_tokens,output_tokens,total_tokens,cache_read.input_tokens}`
-- AGENT span 必须含 `gen_ai.agent.name` + 汇总的 `usage.*`
-- 每个 user turn 一个独立 trace(独立 traceId);所有 turn 共享同一个 `gen_ai.session.id`
+### C1.1 公共属性(每个 span 都应当含)
 
-**反例**:不符合规范的字段名(如自创 `tokens` / `model_name`)。
+| 字段 | 等级 | 示例 |
+|---|---|---|
+| `gen_ai.span.kind` | 必须 | `ENTRY` / `AGENT` / `STEP` / `LLM` / `TOOL` |
+| `gen_ai.operation.name` | 必须 | `enter` / `invoke_agent` / `react` / `chat` / `execute_tool` |
+| `gen_ai.session.id` | 有条件必须 | 同一 session 内所有 turn / span 共享 |
+| `gen_ai.user.id` | 有条件必须 | C 端用户标识 |
+| `gen_ai.framework` | 有条件必须 | 如 `langchain` / `claude-code` / `codex` |
+
+### C1.2 LLM span(`gen_ai.span.kind=LLM`)必采
+
+| 字段 | 等级 |
+|---|---|
+| `gen_ai.provider.name`(如 `openai` / `anthropic`) | 必须 |
+| `gen_ai.request.model` / `gen_ai.response.model` | 必须 / 推荐 |
+| `gen_ai.response.finish_reasons` | 推荐 |
+| `gen_ai.usage.input_tokens` / `output_tokens` / `total_tokens` | 推荐(三个都要) |
+| `gen_ai.usage.cache_creation.input_tokens` / `cache_read.input_tokens` | 推荐(若 provider 支持) |
+| `gen_ai.input.messages` / `gen_ai.output.messages` | 内容采集开启时(C3) |
+| `gen_ai.system_instructions` / `gen_ai.tool.definitions` | 内容采集开启时(C3) |
+| `gen_ai.conversation.id` | 有条件必须(可与 session.id 同) |
+
+### C1.3 AGENT span(`gen_ai.span.kind=AGENT`)必采
+
+| 字段 | 等级 |
+|---|---|
+| `gen_ai.agent.name` | 必须(`<agent_id>`) |
+| `gen_ai.agent.description` / `gen_ai.agent.id` | 有条件必须 |
+| 汇总的 `gen_ai.usage.{input,output,total,cache_read.input}_tokens` | 推荐 |
+| `gen_ai.system_instructions` / `gen_ai.tool.definitions` | 内容采集开启时(C3) |
+
+### C1.4 ENTRY span(`gen_ai.span.kind=ENTRY`,**LoongSuite 扩展**)必采
+
+每个 user turn 一个独立 trace(独立 traceId);所有 turn 共享同一个 `gen_ai.session.id`。
+
+| 字段 | 等级 |
+|---|---|
+| `gen_ai.session.id` | 必须 |
+| `gen_ai.user.id` | 有条件必须 |
+| `gen_ai.input.messages` / `gen_ai.output.messages` | 内容采集开启时(C3) |
+
+### C1.5 STEP span(`gen_ai.span.kind=STEP`,**LoongSuite 扩展**,ReAct 一轮)
+
+| 字段 | 等级 |
+|---|---|
+| `gen_ai.react.round` | 推荐(从 1 起) |
+| `gen_ai.react.finish_reason` | 推荐 |
+
+### C1.6 TOOL span(`gen_ai.span.kind=TOOL`)
+
+| 字段 | 等级 |
+|---|---|
+| `gen_ai.tool.name` | 推荐 |
+| `gen_ai.tool.call.id` | 推荐 |
+| `gen_ai.tool.type`(`function` / `extension` / `datastore`) | 推荐 |
+| `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` | 内容采集开启时(C3) |
+
+**反例**:不符合规范的字段名(如自创 `tokens` / `model_name`)— 会被 ARMS / cms2.0 平台无法解析。
 
 ---
 
